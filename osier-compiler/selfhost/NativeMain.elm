@@ -347,7 +347,13 @@ renderJob rt corpus entryKey ( job, elmGroup ) midResult =
                     , midCons = True
                     , rtLean = True
                     , mono = True
-                    , wordVal = False
+                    -- (VR3d) THE FLIP: run.js's default is the WORD arm now
+                    -- (`QBE_VALREP !== 'val'`), so this twin says True.  It is
+                    -- not cosmetic — the seed is this file's own emit, and a
+                    -- twin left at False would make the native compiler emit
+                    -- the val arm while the stock one emits the word arm, i.e.
+                    -- the .ssa fixed point would stop closing on its first run.
+                    , wordVal = True
                     , consArr = True
                     , rec = True
                     , typeSpec = True

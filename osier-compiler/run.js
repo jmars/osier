@@ -351,16 +351,37 @@ const QBE_RTLEAN = process.env.QBE_NORTLEAN !== '1';
 // committed baseline byte-for-byte), and the structural gate's off arm.
 // Default ON.
 const QBE_MONO = process.env.QBE_NOMONO !== '1';
-// QBE_VALREP=word selects the WORD Value representation (perf VR3b): ONE
-// 8-byte tagged word per value instead of the 40-byte {tag, payload} struct
-// (Mid.RtLayout.wordLayout; the tag lives in the low 3 bits, body strides
-// shrink, the 2-word GC header does not move).  IT DOES NOT WORK YET (VR3b1):
-// the emitter stops at its ONE choke point (Mid.Qbe.Lower.wordArmUnsupported)
-// with a loud error NAMING the first construct it cannot lower.  That is
-// deliberate — a half-flipped emit LINKS CLEANLY and then reads another
-// representation's bytes at the wrong offset, so the arm must fail, never
-// half-work.  Default val, i.e. the 40-byte representation, byte-identical.
-const QBE_WORDVAL = process.env.QBE_VALREP === 'word';
+// THE VALUE REPRESENTATION (perf VR3b/VR3d): the WORD arm is the DEFAULT —
+// ONE 8-byte tagged word per value instead of the 40-byte {tag, payload}
+// struct (Mid.RtLayout.wordLayout; the tag lives in the low 3 bits, body
+// strides shrink, the 2-word GC header does not move).  `QBE_VALREP=val`
+// selects the 40-byte representation, and it must be asked for EXPLICITLY:
+// an unset QBE_VALREP is the WORD arm (VR3d's flip — a default that also
+// accepted `val` would have made "unset" ambiguous, and every one of the five
+// word-arm instruments derives its VAL side from naming the arm, never from
+// the default).
+//
+// THE VAL ARM STILL WORKS AND MUST KEEP WORKING.  It is no longer the default
+// but it is the DIFFERENTIAL ORACLE: word-arm-corpusrun/diff/gcchurn/i61 and
+// word-arm-probe compare the two arms, so a val arm that dies takes every one
+// of those comparisons with it (a vacuous green, this arc's recurring class).
+//
+// THE CHOKE POINT IS UNCHANGED IN KIND (VR3b1): a construct the word arm
+// cannot lower still stops at Mid.Qbe.Lower's wordArmUnsupported with a loud
+// error NAMING it, rather than emitting half-word code — a half-flipped emit
+// LINKS CLEANLY and then reads another representation's bytes at the wrong
+// offset, so the arm must fail, never half-work.  As of VR3d the corpus
+// reaches no such construct (census: 125 both / 34 same-error / 0 blocked);
+// the seat stays because the next ported construct is what will reach it.
+const QBE_WORDVAL = process.env.QBE_VALREP !== 'val';
+// AN UNKNOWN ARM NAME IS REFUSED, never silently resolved to the default (the
+// five word-arm instruments refuse one too, word-arm-corpusrun.sh:130-132 and
+// friends).  `QBE_VALREP=Word`/`VALREP=word ` must not quietly measure the
+// other arm and print a headline about the one that was asked for.
+if (process.env.QBE_VALREP !== undefined && !['word', 'val'].includes(process.env.QBE_VALREP)) {
+  console.error(`run.js: QBE_VALREP='${process.env.QBE_VALREP}' is not an arm (expected 'word' or 'val')`);
+  process.exit(2);
+}
 // QBE_NOCONSARR=1 RESTORES the pre-(A) two-word cons representation (cons as
 // two interior pointers into a 2-element array, the old fused-pair shape).
 // It is the corpus attribution hatch for (A): QBE_NOCONSARR=1 must reproduce
