@@ -3255,20 +3255,34 @@ checks rt rawMidText =
     , check "AREA 4 SUPERSEDES VR3b3 FIX F6 - THE `mk*` PATH IS RANGE-CHECKED, AND THE FAILURE BRANCH NOW BOXES INSTEAD OF REFUSING (perf word-arm-area4). A word-arm fixnum is an i61, so `mknum` of a value whose top three bits survive the tag shift would be SILENTLY TRUNCATED - and `mknum` is how every runtime site boxes a word. The check is a ROUND TRIP (`w << 3 >> 3 == w`), and BOTH halves of the old row's claim are now the stronger statement: a COMPILE-TIME constant outside i61 emits a `Rt.boxInt` call (it used to be a named EMIT refusal, because the boxing path did not exist), and a DYNAMIC word keeps the round-trip check whose failure branch is the SAME boxing call instead of `Rt.die`. The `Rt.die` refusal text is gone from the emitted module entirely, which is the asymmetry this row pins: the pre-fix .ssa carried `mknum overflow ... Refusing instead of truncating` and the post-fix .ssa carries `call $q_Rt_x2eboxInt` and NO such message."
         ((case QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities [ bigMkProbe ]) [ bigMkProbe ] "Bm.f" of
             -- THE COMPILE-TIME CONSTANT: it must EMIT now, and it must emit the
-            -- SEAT.  `2^60` is host-exact, so its i64 is rebuilt from limbs
-            -- (256 * 2^52) rather than printed as an `Il.Con` — the reason the
-            -- limbs are asserted rather than the number.
+            -- SEAT.  The constant is rebuilt from base-2^26 limbs rather than
+            -- printed as an `Il.Con` — the reason the limbs are asserted rather
+            -- than the number.
+            --
+            -- THE PROBE VALUE IS PRINTER-EXACT ON BOTH HOSTS, and that is a
+            -- REVIEW FIX, not decoration.  It used to be 2^60, whose 19-digit
+            -- decimal the node host prints as 1152921504606847000 (MEASURED; the
+            -- exact value ends ...976), so `emitExactWord`'s `String.fromInt`
+            -- bridge built limbs (24, 0, 256) and the emitted code boxed
+            -- 2^60 + 24 — while this row stayed GREEN, because it asserted only
+            -- the HIGH limb, and the digits a shortest-repr misprint corrupts are
+            -- always the LOW ones.  `1200000000000000000` is a multiple of 256 in
+            -- [2^60, 2^61) (hence exactly representable) AND its shortest decimal
+            -- IS the integer, so BOTH hosts spell the same digits and the row can
+            -- pin all three limbs.
             Ok mod ->
                 let
                     txt =
                         Print.print mod
                 in
-                -- THE PROPERTY, NOT THE TEMP IDS: the exact i64 is rebuilt
-                -- from base-2^26 limbs (2^60 is `256 * 2^52`, so the high limb
-                -- carries it and the low two are zero), and the RESULT is the
-                -- boxing seat.  Temp numbers move whenever the writer gains a
-                -- temp; the limb product and the seat are what the claim is.
-                String.contains "=l mul 256, 4503599627370496" txt
+                -- THE PROPERTY, NOT THE TEMP IDS: the exact i64 is rebuilt from
+                -- base-2^26 limbs — (l0, l1, l2) = (41418752, 30435608, 266), so
+                -- the low limb is NON-ZERO and is asserted as the trailing Con of
+                -- its add line (temp ids move whenever the writer gains a temp) —
+                -- and the RESULT is the boxing seat.
+                String.contains "=l mul 30435608, 67108864" txt
+                    && String.contains ", 41418752\n" txt
+                    && String.contains "=l mul 266, 4503599627370496" txt
                     && String.contains "call $q_Rt_x2eboxInt(" txt
                     && not (String.contains "mknum of a compile-time value" txt)
                     && not (String.contains "mknum overflow" txt)
@@ -16529,7 +16543,15 @@ bigMkProbe =
                 Unsafe
                     (RawMkValue
                         { tag = RtLayout.tagNumber
-                        , words = [ Lit (LNumber 1152921504606846976) ]
+
+                        -- 1.2e18: OUTSIDE i61 (>= 2^60, so it must box) and its
+                        -- decimal is the SAME string on both hosts — a multiple
+                        -- of 256 in [2^60, 2^61), so exactly representable, and
+                        -- its shortest round-tripping decimal IS the integer.  The
+                        -- probe used to be 2^60, whose decimal the node host prints
+                        -- 24 short of the value, which is why the row could not see
+                        -- the low limb it was supposed to pin.
+                        , words = [ Lit (LNumber 1200000000000000000) ]
                         }
                     )
             }

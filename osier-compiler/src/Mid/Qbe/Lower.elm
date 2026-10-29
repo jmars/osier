@@ -4704,20 +4704,30 @@ storeWordCell code words dest s0 =
                                     in
                                     Ok (boxWordInt v dest s1)
 
-                                else if n <= 4503599627370496 && n >= -4503599627370496 then
-                                    -- INSIDE i61 AND INSIDE 2^52, so `n * 8` is a
-                                    -- host product the PRINTER reproduces exactly
-                                    -- and `Il.Con` may carry it.
+                                else if n <= 1125899906842624 && n >= -1125899906842624 then
+                                    -- INSIDE i61 AND INSIDE 2^50, so `n * 8` stays
+                                    -- at or below 2^53 — the measured-exact zone of
+                                    -- BOTH hosts' printers — and `Il.Con` may carry
+                                    -- it.  (The gate was 2^52 until the AREA 4
+                                    -- review: `n * 8` then reached 2^55, where
+                                    -- `String.fromInt` prints 36028797018963970 for
+                                    -- the exact ...968, so the old gate let a wrong
+                                    -- constant through the arm it existed to
+                                    -- protect.  Latent — the parser's literals are
+                                    -- `SmallInteger`, and `fromInt` is exact there —
+                                    -- but the comment above it was false at the top
+                                    -- of its own range.)
                                     Ok (emit (Store StoreL (Il.Con (n * 8)) (Il.Tmp (slotTmp dest))) s0)
 
                                 else
-                                    -- INSIDE i61 BUT ABOVE 2^52: `n * 8` is up to
+                                    -- INSIDE i61 BUT ABOVE 2^50: `n * 8` is up to
                                     -- 2^63 and `Il.Con` would PRINT it through
-                                    -- `String.fromInt`, which loses the low digits
-                                    -- of any non-power-of-two above 2^53 (the same
-                                    -- trap the boxing arm avoids).  So the exact
-                                    -- i64 is rebuilt from limbs and SHIFTED AT
-                                    -- RUNTIME instead of in the host.
+                                    -- `String.fromInt`, which prints the SHORTEST
+                                    -- round-tripping double decimal and so loses
+                                    -- the low digits of any non-power-of-two above
+                                    -- 2^53 (the same trap the boxing arm avoids).
+                                    -- So the exact i64 is rebuilt from limbs and
+                                    -- SHIFTED AT RUNTIME instead of in the host.
                                     let
                                         ( v, s1 ) =
                                             emitExactWord n s0
