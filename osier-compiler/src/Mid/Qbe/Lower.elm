@@ -4704,8 +4704,30 @@ storeWordCell code words dest s0 =
                                     in
                                     Ok (boxWordInt v dest s1)
 
-                                else
+                                else if n <= 4503599627370496 && n >= -4503599627370496 then
+                                    -- INSIDE i61 AND INSIDE 2^52, so `n * 8` is a
+                                    -- host product the PRINTER reproduces exactly
+                                    -- and `Il.Con` may carry it.
                                     Ok (emit (Store StoreL (Il.Con (n * 8)) (Il.Tmp (slotTmp dest))) s0)
+
+                                else
+                                    -- INSIDE i61 BUT ABOVE 2^52: `n * 8` is up to
+                                    -- 2^63 and `Il.Con` would PRINT it through
+                                    -- `String.fromInt`, which loses the low digits
+                                    -- of any non-power-of-two above 2^53 (the same
+                                    -- trap the boxing arm avoids).  So the exact
+                                    -- i64 is rebuilt from limbs and SHIFTED AT
+                                    -- RUNTIME instead of in the host.
+                                    let
+                                        ( v, s1 ) =
+                                            emitExactWord n s0
+
+                                        ( sh, s2 ) =
+                                            freshTmp s1
+                                    in
+                                    Ok (emit (Bin (Just sh) L Shl v (Il.Con s0.layout.tagBits)) s2
+                                            |> (\st -> storeWordWord (Il.Tmp sh) dest st)
+                                       )
 
                             _ ->
                                 let
@@ -5165,16 +5187,35 @@ or beyond 2^53 needs, because `Il.Con` carries a host `Int` and its PRINTING
 loses the low digits (`String.fromInt` answers 1152921504606847000 for 2^60 —
 MEASURED; the same trap `lowerLitVal`'s `LNumberBig` arm avoids with limbs).
 
-Three base-2^26 limbs, which is how `IntegerLiteral.limbsOf` splits a decimal
-literal: each limb is host-exact, `2^26` and `2^52` are exact constants, and the
-intermediate products WRAP in two's complement — which is exactly the i64 bit
-pattern wanted.  A NEGATIVE `n` is `0 - v`, the same wrap `lowerLitVal` uses.
+THE SPLIT IS DONE ON THE DECIMAL, NOT BY DIVISION, and that is forced by the
+HOST RULE `IntegerLiteral`'s header states: this module's source is compiled by
+BOTH hosts — natively (i64) and by stock Elm under node, where `Int` is a double
+AND `//` IS `(a/b)|0`, a 32-bit truncation.  So a quotient here is wrong in one
+host or unavailable in the other: the first cut of this function used `//` and
+MEASURED `2^60 // 2^26 == 0` under node (it emitted `mul 0, 4503599627370496`
+and boxed ZERO); the second cut used `floor`, which the SELFHOST surface
+language does not have at all (MEASURED: `qbe-bootstrap.sh --status` reported
+`err type error at 5220:13: unknown name: floor`).  Both spellings are dead ends
+and the reason is the same: division is the thing this host pair disagrees about.
 
-DOMAIN: any `n` this compiler can hold, i.e. a double.  The limb split is exact
-for a double because each limb is an integer below 2^26 and the quotient chain
-is exact (`n / 2^26` and `n / 2^52` are exact for a value whose magnitude is at
-least 2^52; below that the value is already host-exact and `Con` would do, but
-this function is only reached above 2^60).
+`IntegerLiteral.limbsOf` never divides — it accumulates base-2^26 limbs from the
+DIGITS with multiply-add, whose intermediates stay under 2^31 so both hosts agree
+exactly.  So the split goes through the decimal: `String.fromInt n`, which is
+EXACT for every `Int` this function can be handed, because `SmallInteger` is
+bounded at 2^53 and every integer up to 2^53 is an exact double AND prints
+exactly.  (A host `Int` above that cannot reach here: `Il.Con` values come from
+`SmallInteger`, whose invariant the parser enforces lexically.  If that invariant
+were ever violated the digits would round under node — the class only the fixed
+point catches — which is why the invariant, not this function, is the guarantee.)
+
+Three base-2^26 limbs, `2^26` and `2^52` exact constants, and the intermediate
+products WRAP in two's complement — exactly the i64 bit pattern wanted.  A
+NEGATIVE `n` is `0 - v`, the same wrap `lowerLitVal` uses.
+
+An `n` whose digits will not parse cannot happen (`String.fromInt` is canonical);
+`Nothing` therefore answers the zero limb triple and the caller still emits a
+well-formed word, so a violation surfaces as a wrong NUMBER rather than as
+malformed .ssa.
 -}
 emitExactWord : Int -> S -> ( Il.Arg, S )
 emitExactWord n s0 =
@@ -5203,30 +5244,26 @@ emitExactWord n s0 =
         ( t5, s8 ) =
             freshTmp s7
 
-        magnitude =
-            if n < 0 then
-                0 - n
+        -- the split, from the DECIMAL (see the doc comment): no division, so it
+        -- is exact on both hosts.  The fallback triple is all zeros rather than
+        -- a refusal, so a violation shows up as a wrong number, not as .ssa
+        -- that will not assemble.
+        limbs =
+            case IntegerLiteral.limbsOf (String.fromInt n) of
+                Just l ->
+                    l
 
-            else
-                n
-
-        -- NOT `//`: ELM'S `//` IS 32-BIT TRUNCATING (`(a / b) | 0`), so
-        -- `2^60 // 2^26` answers 0 rather than 2^34 — MEASURED here, the first
-        -- cut of this function emitted `mul 0, 4503599627370496` for 2^60 and
-        -- boxed ZERO.  `floor (a / b)` is `Math.floor`, exact for integral
-        -- doubles at any magnitude, which is the whole reason a limb split is
-        -- done with doubles rather than with integer division.
-        q1 =
-            floor (toFloat magnitude / 67108864)
-
-        limb2 =
-            floor (toFloat q1 / 67108864)
-
-        limb1 =
-            q1 - limb2 * 67108864
+                Nothing ->
+                    { negative = False, l0 = 0, l1 = 0, l2 = 0 }
 
         limb0 =
-            magnitude - q1 * 67108864
+            limbs.l0
+
+        limb1 =
+            limbs.l1
+
+        limb2 =
+            limbs.l2
 
         s9 =
             s8
