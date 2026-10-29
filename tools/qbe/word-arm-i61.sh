@@ -63,11 +63,17 @@ fail() { echo "FAIL $1"; fails=$((fails + 1)); }
 # build <src> <arm> <tag> -> $BUILD/<tag> (or a FAIL and a non-zero return)
 build() {
   local src="$1" arm="$2" tag="$3" ssa="$BUILD/$3.ssa"
-  if [ "$arm" = word ]; then
-    (cd "$CDIR" && QBE_VALREP=word QBE_ENTRY=M.main node run.js "$src" "$ssa") >/dev/null 2>&1
-  else
-    (cd "$CDIR" && QBE_ENTRY=M.main node run.js "$src" "$ssa") >/dev/null 2>&1
-  fi
+  local -a arms
+  # BOTH ARMS EXPLICIT (flip-prep): the val arm used to be "QBE_VALREP unset",
+  # i.e. the DEFAULT arm — the flip makes that the WORD arm, and every row
+  # below would then compare word against word while still printing its
+  # counter assertions green.
+  case "$arm" in
+    val)  arms=(QBE_VALREP=val) ;;
+    word) arms=(QBE_VALREP=word) ;;
+    *) fail "$tag: unknown arm '$arm'"; return 1 ;;
+  esac
+  (cd "$CDIR" && env "${arms[@]}" QBE_ENTRY=M.main node run.js "$src" "$ssa") >/dev/null 2>&1
   if [ ! -s "$ssa" ]; then fail "$tag: no .ssa emitted"; return 1; fi
   case "$(head -c 4 "$ssa")" in
     "err "*) fail "$tag: the compile REFUSED — $(head -c 200 "$ssa")"; return 1 ;;

@@ -55,8 +55,11 @@
 # `veclen` and `call` probes are complements to this row, not duplicates.
 #
 # WHAT IT DOES.  For each fixture: compile the same source TWICE — once on the
-# val arm (`QBE_ENTRY=M.main node run.js`) and once with `QBE_VALREP=word` —
-# assemble each through the SAME vendored qbe, link each with cc, RUN each with
+# val arm (`QBE_VALREP=val QBE_ENTRY=M.main node run.js`) and once with
+# `QBE_VALREP=word` — BOTH ARMS EXPLICIT, never "the default": the flip makes
+# an unset QBE_VALREP the WORD arm, which would leave this row comparing word
+# against word and still printing its green.  Then assemble each through the
+# SAME vendored qbe, link each with cc, RUN each with
 # the entry name, and gate on
 #   (a) both binaries building (a qbe or cc failure is a FAIL, not a skip),
 #   (b) IDENTICAL exit codes,
@@ -91,7 +94,7 @@ for src in "$HERE"/*.elm; do
   mod="$(sed -n 's/^module \([A-Za-z0-9_]*\) .*/\1/p' "$src" | head -1)"
   entry="$mod.main"
 
-  (cd "$CDIR" && QBE=1 QBE_ENTRY="$entry" node run.js "$src" "$BUILD/$name.val.ssa") >/dev/null 2>&1
+  (cd "$CDIR" && QBE=1 QBE_VALREP=val QBE_ENTRY="$entry" node run.js "$src" "$BUILD/$name.val.ssa") >/dev/null 2>&1
   (cd "$CDIR" && QBE_VALREP=word QBE_ENTRY="$entry" node run.js "$src" "$BUILD/$name.word.ssa") >/dev/null 2>&1
 
   for arm in val word; do

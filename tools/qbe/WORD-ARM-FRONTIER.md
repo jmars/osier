@@ -19,7 +19,8 @@ lane.
 
 For every group the LANGUAGE GATE registers (159 unique groups; the plan carries
 160 emissions because the gate registers one twice), compile through the QBE
-backend twice — once on the val arm, once with `QBE_VALREP=word` — and classify:
+backend twice — once on the val arm (`QBE_VALREP=val`), once with
+`QBE_VALREP=word` — and classify:
 
 | verdict | meaning |
 | --- | --- |
@@ -631,7 +632,7 @@ rows + two hand-run subsets (26 `let`-destructuring, 7 host) — not the corpus.
 This arc's own evidence that the difference is real is the host path: 7 groups
 printed `[vector 4]` with **rc 0 and no stderr** and the census was green over
 them.  So: every group the census calls `BOTH` is built **both ways** (val:
-`QBE_VALREP` unset; word: `QBE_VALREP=word`), assembled through the same
+`QBE_VALREP=val` EXPLICITLY; word: `QBE_VALREP=word`), assembled through the same
 vendored qbe, linked with cc, and RUN on both ways.
 
 ### What the number is now

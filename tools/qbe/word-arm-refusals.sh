@@ -12,13 +12,18 @@
 #
 # WHAT IT DOES, per group the LANGUAGE GATE registers (the gate's own manifest,
 # as tools/osier-corpus-ssa.sh reads it): compile the group through the QBE
-# backend TWICE — once on the val arm and once with QBE_VALREP=word — and
-# classify the result:
+# backend TWICE — once on the val arm (QBE_VALREP=val, EXPLICIT) and once with
+# QBE_VALREP=word — and classify the result:
 #
 #   BOTH            both arms emitted IL                    (not blocked)
 #   SAME-ERROR      both arms refused with IDENTICAL text   (not a word-arm
 #                   blocker: the group is a compile_error row, or invalid)
 #   WORD-BLOCKED    val emitted, word refused               (a real blocker)
+
+# THE VAL ARM IS NAMED, NOT LEFT UNSET (flip-prep).  Before this, "val" meant
+# "do not set QBE_VALREP", i.e. it read the DEFAULT arm — so the moment the
+# default flips to word the script would classify word against word and print
+# its usual green.  This denominator is only as good as that one line.
 #
 # The refusal text is then split into one line per (defun, construct) and the
 # lines are folded by CONSTRUCT CLASS.  The classifier reports EVERY blocker —
@@ -91,7 +96,13 @@ cat > "$WORK/one.sh" <<'EOJ'
 IFS='|' read -r name srcs entry <<< "$1"
 arm="$3"
 envs=()
-[ "$arm" = word ] && envs=(QBE_VALREP=word)
+# EXPLICIT PER ARM (flip-prep): "val" must never mean "the default", or the
+# flip turns this script into a word-vs-word comparison that still prints green.
+case "$arm" in
+  val)  envs=(QBE_VALREP=val) ;;
+  word) envs=(QBE_VALREP=word) ;;
+  *) echo "word-arm-refusals: unknown arm '$arm'" >&2; exit 2 ;;
+esac
 ( cd "$OSIER_ROOT/osier-compiler" &&
   env "${envs[@]}" QBE=1 QBE_ENTRY="$entry" node run.js $srcs "$2/$name.ssa" ) >/dev/null 2>&1
 EOJ

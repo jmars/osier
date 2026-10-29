@@ -16,7 +16,8 @@
 # WHAT IT DOES, per group the language gate registers (the gate's own manifest,
 # as `word-arm-refusals.sh` reads it):
 #
-#   1. EMIT both arms (val: QBE_VALREP unset, word: QBE_VALREP=word) and
+#   1. EMIT both arms (val: QBE_VALREP=val, word: QBE_VALREP=word — BOTH
+#      EXPLICIT, see `emit()` below) and
 #      classify the group exactly as the census does — BOTH / SAME-ERROR /
 #      WORD-BLOCKED.  A group that does not emit IL on both arms cannot be run
 #      on both arms and is reported as NOT RUN with its class; it is NOT
@@ -119,8 +120,17 @@ cat > "$WORK/one.sh" <<'EOJ'
 IFS='|' read -r name srcs entry <<< "$1"
 W="$WORK"
 emit() { # <arm> <out>
+  # BOTH ARMS ARE EXPLICIT, NEVER "the default" (flip-prep).  The val arm used
+  # to be expressed by QBE_VALREP being UNSET, which means that the day the
+  # default flips to word this script compares word against word and still
+  # prints 125/125 identical — a vacuous green wearing the headline.  Naming
+  # the arm means the flip cannot silently disarm the row.
   local envs=()
-  [ "$1" = word ] && envs=(QBE_VALREP=word)
+  case "$1" in
+    val)  envs=(QBE_VALREP=val) ;;
+    word) envs=(QBE_VALREP=word) ;;
+    *) echo "word-arm-corpusrun: unknown arm '$1'" >&2; exit 2 ;;
+  esac
   ( cd "$OSIER_ROOT/osier-compiler" &&
     env "${envs[@]}" QBE=1 QBE_ENTRY="$entry" node run.js $srcs "$2" ) >/dev/null 2>&1
 }
