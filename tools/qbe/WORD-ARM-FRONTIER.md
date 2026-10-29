@@ -1231,3 +1231,73 @@ word arm**.
 `WORD-BLOCKED = 0` was never evidence that the arm is CORRECT, and this is the
 sharpest instance yet: the census is unchanged by the flip (125 / 34 / 0) while
 a 1e6-hop tail chain and the whole-compiler emit both fail.
+
+---
+
+# AREA 6: THE GENERIC-APPLY HOP TAIL-CALLS (perf word-arm-area6)
+
+**APPEND-ONLY, AND IT SUPERSEDES DEFECT 1 ABOVE.** The section above says the
+word arm's `clostail-big` is red because `rtCallTwoRange` cannot tcall, and that
+the naive fix is refuted by QBE. The FIRST half of that is now fixed; the SECOND
+half was measured FALSE last unit, and the real refusal was somewhere else.
+
+## What was actually wrong, in the order it was found
+
+1. **The recorded refutation was wrong.** "Enabling the tcall emits
+   `tcall :val %code(env %e, l %pv0)` in a block that LOADED `%pv0` first and
+   QBE rejects exactly that" — MEASURED, four shapes: that exact shape
+   ASSEMBLES (rc 0). The reproduction that had seemed to red it was malformed
+   twice over: its `export function` omitted the return type (QBE: "newline
+   expected, got ??") and its mutation put the load AFTER the tcall (which
+   trips the bare-`ret` rule). The one shape QBE refuses is a **CLASS
+   MISMATCH**, refused by name in both directions.
+2. **But the first cut still would not assemble, for a real reason.** `gcm`'s
+   `sink()` appends instructions AFTER a `tcall`: `gvn` CSEs the arity blocks'
+   shared address chains into a dominator, so a load has no local chain;
+   `sink()` re-materialises that chain in the load's block; `sinkref` emits the
+   instruction BEFORE rewriting its args, so the copies it recurses into are
+   DEAD; `addins` appends, so they land after the tcall; `schedblk` has no use
+   edge to order the dead ones by. abi1 refuses the emit. (Found with a debug
+   build of qbe in scratch — vendor/qbe untouched.) The val arm never sees it:
+   it passes arg POINTERS, so its tcall blocks hold no load at all.
+3. **The class was never the word arm's problem.** MEASURED at HEAD:
+   `rt_call2r` already declared `ret = Agg "val"` and annotated both call forms
+   `Agg "val"`, and `lowerFunBody` gives every RtGeneric body — what `%code`,
+   the DYNAMIC callee here, points at — `retTy = closureRetClass sOuter`. U3b
+   had already made both ends `:val` on BOTH arms.
+
+## The fix
+
+* `rtCallTwoRange` takes `S`; `tailClass = closureRetClass s` is ONE binding
+  used by the tcall, by the ordinary call's result class, and by the function's
+  own `ret`. A mismatch is unrepresentable there; the check that can still fail
+  is abi1's C4, which refuses by name.
+* `canTail = n <= maxTailCallArgs`. `not (wordArmLayout layout)` is GONE.
+* `argLoad` moves each argument's load ONE BLOCK EARLIER, into the dispatch
+  block that proves the argument exists (`@c{k}` is reached only when
+  `arity >= k`, so argument k-1 is always present). Every tcall block is now
+  `tcall :val %code(env %e, l %pv<n>…)` + a bare `ret` — byte for byte the val
+  arm's tcall shape. The last arity loads its final argument itself (no
+  `@c{maxArity}`, and it takes an ordinary call). Each argument is still loaded
+  exactly once, so the cost is unchanged. The VAL arm's emit is untouched — the
+  fork is `wordArmLayout layout`.
+
+## MEASURED
+
+| instrument | before | after |
+| --- | --- | --- |
+| `clostail-big` (OWNED 8 MiB stack, `QBE_NO_RLIMIT=1`) | n=8000 rc 0, **n=9000 SIGSEGV** | **n=1e6 rc 0, out "0"** (flat; n=5/3000/9000/1e5 all rc 0) |
+| the word `.ssa` through vendor/qbe | rc 1, "tcall must be the last instruction of its block" | **rc 0** |
+| tcalls in `rt_call2r` (word arm) | 0 | 5 (arity 0-4), every one followed by a bare `ret` |
+
+`tools/qbe/tcall-class-probe.sh` is the standing instrument (wired into
+qbe-check): the legal shape assembles; a class mismatch is refused BY NAME in
+both directions; no tcall block in the real emit loads; the first cut's shape,
+DERIVED from the real emit, is refused. A bare re-load would not do — it is the
+address `@c1` already loaded and `loadopt` forwards it away, MEASURED, which is
+why the derived row duplicates the chain.
+
+**STILL OPEN (unchanged by this unit):** defects 2 and 3 above — the word-arm
+seed cannot run the whole-compiler emit (16 GB poisoned-body, 32 GB class
+field), so the `.ssa` fixed point does not close. The flip is NOT gated on that
+here; it is gated on `clostail-big`, which is now green.

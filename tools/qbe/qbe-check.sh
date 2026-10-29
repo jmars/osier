@@ -1387,6 +1387,19 @@ leak_apply_gate
 # chain (the 32 B state / 80 B Ret / 640 B args buffer per hop).  The bound is
 # 32 MB = 2x the measured 16.28 MB peak (the GC heap, stable to +-30 kB over 5
 # runs), which fails on a >=16 B/hop leak at 1e6 hops and never flakes clean.
+#
+# SINCE perf word-arm-area6 THIS ROW IS GREEN ON THE DEFAULT (WORD) ARM, which
+# is the whole point of that unit: `rtCallTwoRange`'s arity blocks now `tcall`
+# on both arms.  Before it, this was the flip's one RED row (n=8000 rc 0, n=9000
+# rc 139 under this same owned stack) — the word arm CALLED the callee, so every
+# hop of a re-entered chain stacked one `rt_call2r` frame.  What unblocked the
+# tcall was NOT the class (both ends were already `:val`, U3b) and NOT the load
+# shape (that shape assembles; the recorded refutation was malformed): it was
+# gcm's sink pass, which appends dead copies AFTER a tcall in any block that
+# both loads and tcalls, so the argument load had to move one block earlier.
+# The relay-patch asymmetry above is unchanged and still the FAIL arm of the
+# mutation this row was built with.  The tcall SHAPE and CLASS are gated by the
+# `tcall-class` row above; this row is the FRAME.
 clostail_gate() {
   local fixture="$ROOT/tools/qbe/fixtures/clostail.elm" bin pid peak cur i out rc
   [ -f "$fixture" ] || {
