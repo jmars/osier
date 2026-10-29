@@ -1,25 +1,33 @@
 module M exposing (main)
 
--- THE i61 BOUNDARY, OUTSIDE EDGE (perf word-arm-arith, review finding 1).
+-- THE i61 BOUNDARY, OUTSIDE EDGE — AND SINCE perf word-arm-area4 THE ARMS
+-- AGREE HERE (this file's header said the OPPOSITE, and that claim is the
+-- fail-before record for the boxing path).
 --
--- THE ARMS ARE SUPPOSED TO DIVERGE HERE, which is why this program is NOT in
--- `tools/qbe/word-arm-diff/` — that row asserts the two arms AGREE, and this is
--- the one arithmetic result where they must not:
+-- WHAT THE ARMS DO NOW, and both print the same bytes:
 --
 --   val arm   prints `2305843009213693952` (2^61, the exact i64 product);
---   word arm  EXITS 1 with `qbe-rt: word arm: mknum overflow - the value does
---             not fit the i61 fixnum ... Refusing instead of truncating.`
+--   word arm  prints `2305843009213693952` TOO — the value does not fit the
+--             i61 fixnum, so `storeWordCell`'s round-trip check fails and the
+--             failure branch BOXES it into a code-13 cell instead of halting.
 --
--- WHY THE DIVERGENCE IS THE RIGHT ANSWER AND NOT A BUG: a word-arm fixnum is an
--- i61 (three of the word's bits are the tag), so 2^61 has no fixnum encoding at
--- all.  The alternatives are (a) shift and silently drop the top three bits —
--- the silent-wrong class this whole arm exists to prevent, and exactly what
--- `storeWordCell`'s round-trip check refuses, (b) box it onto the heap — the
--- i61 OVERFLOW/BOXING path, which is valrep2 area 4 and DOES NOT EXIST, or
--- (c) halt with a name.  (c) is what ships, and this fixture is the only place
--- that ever EXECUTES it: the emission-level TestMain row asserts the `.ssa`
--- carries the `Rt.die` call and the message, which is a statement about text,
--- not about a refusal anyone has seen fire.
+-- WHAT THE WORD ARM DID BEFORE (perf word-arm-arith, and it was the correct
+-- answer while the boxing path did not exist): exit 1 with
+-- `qbe-rt: word arm: mknum overflow - the value does not fit the i61 fixnum ...
+-- Refusing instead of truncating.`  THE ASYMMETRY IS THE PROOF: the same
+-- program, the same invocation, one arm, and the row went from exit-1-with-a-
+-- message to exit-0-with-the-exact-value.  A row written at the same time as
+-- the fix could not distinguish "the box works" from "the row was written to
+-- match it".
+--
+-- WHY BOXING IS THE RIGHT ANSWER AND NOT A BUG: a word-arm fixnum is an i61
+-- (three of the word's bits are the tag), so 2^61 has no fixnum encoding.  The
+-- alternatives were (a) shift and silently drop the top three bits — the
+-- silent-wrong class this arm exists to prevent, and what the round-trip check
+-- detects, (b) box it onto the heap — which is what now happens, and (c) halt
+-- with a name, which was the honest stopgap.  Note that the VALUE SPACE is
+-- unchanged by any of this: it is i64 with wrap (L3), and boxing changes only
+-- WHERE the i64 lives.
 --
 -- WHY 2^61 AND NOT 2^60: the bound is EXCLUSIVE IN MAGNITUDE (`-2^60 <= n <
 -- 2^60`, stated once at `RtLayout.wordFixnumLimit`), so `2^60` is already out of
@@ -29,12 +37,7 @@ module M exposing (main)
 -- pass because of a rounding accident.
 --
 -- BOTH OPERANDS ARE LEGAL LITERALS: 2^29 and 2^32, well under the 2^53 past
--- which `lowerLitWord` refuses a literal (`LNumberBig`).  The value that does
--- not fit is therefore COMPUTED, which is the only way to reach the boundary.
---
--- WHAT IS *NOT* TESTED, and why it cannot be: `INT64_MIN // -1`, `Rt./`'s second
--- named halt, is UNREACHABLE on this arm — a word-arm fixnum's magnitude is at
--- most 2^60, so no operand pair can carry INT64_MIN.  The shared check in
--- `Rt./` is inert here; it is not dead code, it is the val arm's.
+-- which a literal needs the exact limb path.  The value that does not fit is
+-- therefore COMPUTED, which is the only way to reach the boundary.
 main =
     536870912 * 4294967296

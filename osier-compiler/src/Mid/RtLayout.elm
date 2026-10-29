@@ -881,9 +881,10 @@ valLayout =
 --      `loadw` of the tag word, word = `loadl` + `and tagMask`.  Ported on top
 --      of it: the boolean condition test in `lowerIf` and the shared
 --      `jmpfFalse` helper (`&&`, `||`, `/=`, one match arm); and the WRITES for
---      the immediates in `lowerLitWord` (a fixnum `n * 8`, refused by name
---      outside i61 because boxing is area 4; `true`/`false` = tagTrue/tagFalse)
---      plus `storeNil`.  THE HEAP-OBJECT HALF IS PORTED (perf
+--      the immediates in `lowerLitWord` (a fixnum `n * 8` inside i61, and a
+--      BOXED cell outside it since perf word-arm-area4 — `bigLiteralFitsFixnum`
+--      decides on the DIGITS and `boxWordInt` builds the code-13 cell;
+--      `true`/`false` = tagTrue/tagFalse) plus `storeNil`.  THE HEAP-OBJECT HALF IS PORTED (perf
 --      word-arm-area3rt/word-arm-surface): every heap tag collapses to
 --      `...001`, so a heap-object test is a 2-word-HEADER KIND read
 --      (`heapTagIsKind`), and `wordTagIs` is the ONE reader of it — it
@@ -918,11 +919,25 @@ valLayout =
 --      needs no prim.  There is NO `%`/modulo operator in this language at all
 --      (`binaryPrims` maps `//` to the prim `/` and defines none), so nothing
 --      was ported for one.
+--      THE i61 OVERFLOW/BOXING PATH IS PORTED (perf word-arm-area4), and it is
+--      the piece that makes this item COMPLETE for integers.  `storeWordCell`'s
+--      fixnum arm keeps its ROUND-TRIP check (`w << 3 >> 3 == w`, the ONE check
+--      per arithmetic write, and on this arm every `+ - * / ^` closes with a
+--      `mknum`, so there is no inline arithmetic left for a second check to
+--      guard) and its FAILURE BRANCH is now `Rt.boxInt` instead of `Rt.die`: a
+--      code-13 cell whose one body word is the raw i64.  Code 13 is the ValTag
+--      gap, its scan bit is RAW by decision (`heapKindScanned` does not list
+--      it), and `wordNumberTagIs` is what makes `tagis(v, 0)` answer for BOTH
+--      encodings — without that the printer and `=` would stop seeing a boxed
+--      value.  The round trip is also what makes the change SAFE for the
+--      seat-return convention: a `mknum(ptr)` word is a user-space address
+--      (below 2^47), so it round-trips and never boxes.
+--      SEMANTICS: an op computes its result with i64 WRAP (L3) and boxing only
+--      changes WHERE the i64 lives, so i61-plus-a-boxed-fallback REPRODUCES
+--      wrap and does NOT widen the range.
 --      NOT PORTED: the inline tag/untag (the runtime call is the route here,
 --      not a slower spelling of it — a fast path would be a second arithmetic
---      to keep in step), the i61 OVERFLOW/BOXING path (a word-arm value that
---      does not fit the fixnum is boxed onto the heap, and that cell does not
---      exist), and CHAR/STRING ORDERING (`"a" < "b"`), whose inline byte loop
+--      to keep in step), and CHAR/STRING ORDERING (`"a" < "b"`), whose inline byte loop
 --      reads a Value's byte pointer at `slot + 8` and its length at
 --      `slot + 16` — it REFUSES by name at `lowerCompare`'s string branch,
 --      because `Rt.<` answers False for every non-number and routing it there
@@ -961,9 +976,15 @@ valLayout =
 --      PROOF, and that is measured: with the arm reverted to non-safepoint, all
 --      four `flt` rungs stay GREEN, because every current `.mid` `mkflt` site
 --      consumes its live value BEFORE the allocation (safe by order).
+--      THE THIRD PLACE THE `mk*`-AS-SAFEPOINT RULE HOLDS, and it is item 4's
+--      arrival that made it the third: a `mknum` can now BOX, so
+--      `wordMkAllocSeat` answers `Rt.boxInt` for `tagNumber` too and a defun
+--      whose only allocation is a `mknum` is ROOTED.  The literal node needed
+--      its own answer as well, because the table is keyed by CODE and the two
+--      number literal FORMS differ — see `Mid.Rt.safepoint`'s `LNumberBig` arm,
+--      which reads the SAME `bigLiteralFitsFixnum` the emitter does.
 --      STILL NOT PORTED IN THIS AREA: the raw-`d` LOCAL lane (`isFloatExp`
---      denies it under this arm, because `reboxFloat` writes the 40-byte shape)
---      and the i61 BOXING path (item 4).
+--      denies it under this arm, because `reboxFloat` writes the 40-byte shape).
 --   6. THE `:ret` AGGREGATE.  Its FIRST FIELD IS A VALUE, so its tail offsets
 --      move with `valSizeBytes` (they are DERIVED below); plus the 80-byte sret
 --      path, slot 1's `.tail` metadata and rt_bounce.

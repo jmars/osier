@@ -1,44 +1,35 @@
-#!/usr/bin/env bash
-# word-arm-i61.sh — THE WORD ARM'S FIXNUM BOUNDARY, EXECUTED (perf
-# word-arm-arith, review finding 1).
+# word-arm-i61.sh — THE WORD ARM'S FIXNUM BOUNDARY, EXECUTED ON BOTH ARMS
+# (perf word-arm-arith; REWRITTEN by perf word-arm-area4).
 #
-# WHY THIS IS NOT A word-arm-diff ROW.  That row asserts the two arms AGREE, and
-# it is the right instrument for everything else in the arithmetic class.  The
-# i61 boundary is the ONE place the arms must NOT agree: a word-arm fixnum is an
-# i61, so a result at or beyond 2^60 in magnitude has no fixnum encoding, while
-# the val arm carries the exact i64 value.  Comparing the arms here would either
-# forbid the correct refusal or bless the wrong number — so this script states
-# the divergence instead, one arm per line, and gates on BOTH.
+# WHAT CHANGED, AND WHY THE REWRITE IS THE UNIT'S PROOF RATHER THAN ITS CHORE.
+# This script used to assert that the two arms DIVERGE at the i61 boundary: the
+# val arm printed the exact i64 product and the word arm exited 1 with the named
+# `mknum overflow` refusal, because the i61 OVERFLOW/BOXING path did not exist.
+# It exists now, so the word arm BOXES the value and prints the same bytes — and
+# the divergence this file was built to state is gone.  THE FAIL-BEFORE IS THE
+# OLD FILE: same program, same invocation, exit 1 + a message, and now exit 0 +
+# the exact value.  A row written at the same time as the fix could not
+# distinguish "the box works" from "the row was written to match it".
 #
-# WHAT WAS UNTESTED BEFORE THIS SCRIPT, and it is the unit's headline semantics:
-# the `mknum` round-trip refusal ("a result outside i61 is a LOUD named
-# refusal") existed only at EMISSION level — a TestMain row asserting the `.ssa`
-# contains the `Rt.die` call and the message.  THAT IS A STATEMENT ABOUT TEXT.
-# A refusal nobody has ever seen fire is not a tested refusal, and the failure
-# it guards against (silently dropping a fixnum's top three bits) is exactly the
-# silent-wrong class the arm exists to prevent.
+# THE ROWS, and every one of them compares the TWO ARMS on the SAME program:
+#   1. 2^61 (the OUTSIDE edge)  — both arms exit 0 printing 2305843009213693952.
+#      The word arm reaches it through a code-13 boxed cell; the val arm carries
+#      it in a 40-byte Value.  Same number, two representations.
+#   2. 2^59 (the INSIDE edge)   — both arms exit 0 printing 576460752303423488,
+#      with NO box.  This is what stops row 1 passing by boxing everything.
+#   3. A NEGATIVE outside value  — `0 - (2^61)` on both arms.  A box is signed
+#      like any i64, so a boxing path that only handled magnitudes would fail
+#      here and pass row 1.
+#   4. A ROUND TRIP              — `(2^61) // (2^61)` is 1.  The boxed operand
+#      has to be READ BACK out of the cell by `Rt./`, so this is the row that
+#      proves the cell's payload is the i64 and not something box-shaped.
+#   5. WRAP THROUGH THE BOX      — `(2^60) * 16` wraps to 0 on both arms, i.e.
+#      boxing does not widen the value space (L3's i64 wrap is unchanged).
 #
-# THE THREE ROWS:
-#   1. word arm, 2^61: exit 1 AND the named message on stderr.  Exit 1 alone is
-#      not enough — a SIGSEGV is 139 and a SIGFPE 136, but a wrong `return 0`
-#      would exit 0, so the pair (status, message) is the assertion.
-#   2. val arm, 2^61: exit 0 and the EXACT i64 product on stdout.  This is what
-#      makes row 1 a decision rather than a limitation: the same program HAS a
-#      value, and the word arm says so instead of printing a truncated one.
-#   3. word arm, 2^59 (the INSIDE edge): exit 0 and the exact value — so row 1
-#      cannot pass by refusing everything large.  (The inside edge is also
-#      compared on both arms by `word-arm-diff/arith.elm`; it is repeated here
-#      so this script is readable on its own.)
-#
-# BOTH VALUES ARE COMPUTED, never spelled: a literal above 2^53 parses as
-# `LNumberBig` and `lowerLitWord` refuses it under the arm, so a near-boundary
-# literal cannot exist.  `536870912 * 4294967296` = 2^29 * 2^32 = 2^61 and
-# `536870912 * 1073741824` = 2^59 — both operands legal, the product not.
-#
-# WHAT IS NOT HERE, and why it cannot be: `INT64_MIN // -1` — `Rt./`'s second
-# named halt — is UNREACHABLE on this arm, because a word-arm fixnum's magnitude
-# is at most 2^60 and so no operand pair can carry INT64_MIN.  The check is the
-# val arm's; it is inert here, not dead.
+# BOTH VALUES ARE COMPUTED, never spelled: 2^61 is `536870912 * 4294967296`
+# (2^29 * 2^32) and 2^59 is `536870912 * 1073741824`.  A big literal DOES work
+# on both arms now (that is AREA 4's literal half, pinned by the `intbig` gate
+# rows), but a computed value is what proves the ARITHMETIC path.
 #
 # Usage (from the repo root):  tools/qbe/word-arm-i61.sh
 # Exit: 0 = every row passed; 1 = a row failed; 2 = tooling missing.
@@ -88,60 +79,97 @@ build() {
 }
 
 OVER="$HERE/over.elm"
-[ -f "$OVER" ] || { echo "FAIL word-arm-i61: $OVER missing — the ONLY fixture that executes the i61 refusal was deleted" >&2; exit 1; }
+[ -f "$OVER" ] || { echo "FAIL word-arm-i61: $OVER missing — the fixture that EXECUTES the i61 boundary was deleted" >&2; exit 1; }
 
-# ---- row 1: the word arm REFUSES 2^61, by name ----
-if build "$OVER" word over-word; then
-  timeout 20 "$BUILD/over-word" M.main > "$BUILD/over-word.out" 2> "$BUILD/over-word.err"
-  rc=$?
-  out="$(cat "$BUILD/over-word.out")"
-  err="$(head -1 "$BUILD/over-word.err")"
-  if [ "$rc" != 1 ]; then
-    fail "over-word: expected exit 1 (the named refusal) and got $rc — stdout [$out] stderr [$err].  A SIGSEGV (139) / SIGFPE (136) is a crash, not a refusal, and 0 means the value was silently WRONG."
-  elif [ -n "$out" ]; then
-    fail "over-word: refused but still printed [$out] — a refusal that also emits a value is the mixed answer this arm exists to prevent"
-  elif ! printf '%s' "$err" | grep -q "mknum overflow"; then
-    fail "over-word: exit 1 but the message does not NAME the refusal — stderr [$err]"
-  elif ! printf '%s' "$err" | grep -q "i61"; then
-    fail "over-word: the message does not name the i61 bound — stderr [$err]"
-  else
-    pass "over-word: 2^61 halts with exit 1 and the NAMED refusal (the mknum round-trip check FIRES; it was never executed before this row) — stderr: $(printf '%s' "$err" | cut -c1-96)..."
+# ---- the two-arm comparison, in ONE place ----------------------------------
+# run <fixture> <arm> <tag> -> sets RC / OUT (and fails the row on a build error)
+RC=0
+OUT=""
+run() {
+  local src="$1" arm="$2" tag="$3"
+  build "$src" "$arm" "$tag" || return 1
+  timeout 20 "$BUILD/$tag" M.main > "$BUILD/$tag.out" 2> "$BUILD/$tag.err"
+  RC=$?
+  OUT="$(cat "$BUILD/$tag.out")"
+  return 0
+}
+
+# agree <tag> <src> <expected> <what>
+# Runs BOTH arms on the same program and requires exit 0 and the SAME bytes from
+# each.  An arm-by-arm message, so a one-sided failure names the arm.
+agree() {
+  local tag="$1" src="$2" want="$3" what="$4"
+  local ok=1
+  run "$src" word "$tag-w" || return
+  local wrc=$RC wout=$OUT werr
+  werr="$(head -1 "$BUILD/$tag-w.err")"
+  run "$src" val "$tag-v" || return
+  local vrc=$RC vout=$OUT verr
+  verr="$(head -1 "$BUILD/$tag-v.err")"
+  if [ "$wrc" != 0 ]; then
+    fail "$tag: the WORD arm must exit 0 — got $wrc, stderr [$werr].  A SIGSEGV (139)/SIGFPE (136) is a crash and 1 is the pre-AREA-4 refusal; neither is the boxed answer."
+    ok=0
+  elif [ "$vrc" != 0 ]; then
+    fail "$tag: the VAL arm must exit 0 — got $vrc, stderr [$verr]"
+    ok=0
+  elif [ "$wout" != "$want" ]; then
+    fail "$tag: the WORD arm must print [$want] and printed [$wout] — $what"
+    ok=0
+  elif [ "$vout" != "$want" ]; then
+    fail "$tag: the VAL arm must print [$want] and printed [$vout] — the val arm is the oracle here and it MOVED, which is a different defect"
+    ok=0
+  elif [ "$wout" != "$vout" ]; then
+    fail "$tag: the arms disagree — word [$wout] val [$vout]"
+    ok=0
   fi
-fi
-
-# ---- row 2: the VAL arm carries the same program to its exact i64 value ----
-if build "$OVER" val over-val; then
-  timeout 20 "$BUILD/over-val" M.main > "$BUILD/over-val.out" 2> "$BUILD/over-val.err"
-  rc=$?
-  out="$(cat "$BUILD/over-val.out")"
-  if [ "$rc" != 0 ]; then
-    fail "over-val: expected exit 0 and got $rc — stderr [$(head -1 "$BUILD/over-val.err")]"
-  elif [ "$out" != "2305843009213693952" ]; then
-    fail "over-val: expected 2305843009213693952 (2^61) and got [$out]"
-  else
-    pass "over-val: the SAME program exits 0 printing 2305843009213693952 (2^61) — so the word arm's halt is a decision about its fixnum, not a limitation of the program"
+  if [ "$ok" = 1 ]; then
+    pass "$tag: BOTH arms exit 0 printing [$want] — $what"
   fi
-fi
+}
 
-# ---- row 3: the INSIDE edge is not refused (the row-1 control) ----
+# ---- row 1: the OUTSIDE edge, boxed on the word arm, exact on both ---------
+agree over "$OVER" "2305843009213693952" "2^61 does not fit the i61 fixnum, so the word arm BOXES it (a code-13 cell holding the raw i64) and answers the val arm's number exactly.  PRE-AREA-4 this row was exit 1 + the named 'mknum overflow' refusal; that asymmetry is the proof."
+
+# ---- row 2: the INSIDE edge is NOT boxed (row 1's control) ----------------
 cat > "$BUILD/in.elm" <<'ELM'
 module M exposing (main)
 
 main =
     536870912 * 1073741824
 ELM
-if build "$BUILD/in.elm" word in-word; then
-  timeout 20 "$BUILD/in-word" M.main > "$BUILD/in-word.out" 2> "$BUILD/in-word.err"
-  rc=$?
-  out="$(cat "$BUILD/in-word.out")"
-  if [ "$rc" != 0 ]; then
-    fail "in-word: 2^59 must NOT be refused — got exit $rc, stderr [$(head -1 "$BUILD/in-word.err")].  Without this row row 1 could pass by refusing everything large."
-  elif [ "$out" != "576460752303423488" ]; then
-    fail "in-word: expected 576460752303423488 (2^59) and got [$out]"
-  else
-    pass "in-word: 2^59 (the inside edge) exits 0 printing 576460752303423488 — the refusal is the BOUND, not a blanket refusal of large values"
-  fi
-fi
+agree inside "$BUILD/in.elm" "576460752303423488" "2^59 FITS the fixnum and stays inline on the word arm.  Without this row row 1 could pass by boxing everything."
+
+# ---- row 3: a NEGATIVE outside value --------------------------------------
+cat > "$BUILD/neg.elm" <<'ELM'
+module M exposing (main)
+
+main =
+    0 - (536870912 * 4294967296)
+ELM
+agree negative "$BUILD/neg.elm" "-2305843009213693952" "a boxed cell is SIGNED like any i64, so a boxing path that only handled magnitudes would pass row 1 and fail here."
+
+# ---- row 4: the boxed operand is READ BACK out of the cell ----------------
+# `Rt./` reads its operands with `payload`, and on the word arm that reader
+# dispatches on the SHAPE — a code-13 cell answers body unit 0.  If the cell's
+# payload were anything but the i64, this is where it shows.
+cat > "$BUILD/rt.elm" <<'ELM'
+module M exposing (main)
+
+main =
+    (536870912 * 4294967296) // (536870912 * 4294967296)
+ELM
+agree roundtrip "$BUILD/rt.elm" "1" "the BOXED operand is read back out of its cell by Rt./ and divided by itself, so this proves the cell's body word IS the i64."
+
+# ---- row 5: WRAP still wraps, THROUGH the box ----------------------------
+# 2^60 is boxed (it does not fit), then `* 16` takes the wrapped product 2^64 to
+# 0, which fits and is a fixnum again.  Boxing does NOT widen the value space.
+cat > "$BUILD/wrap.elm" <<'ELM'
+module M exposing (main)
+
+main =
+    (536870912 * 2147483648) * 16
+ELM
+agree wrap "$BUILD/wrap.elm" "0" "2^60 is boxed, then * 16 WRAPS the i64 product to 0 (L3's wrap is unchanged by the representation) and 0 fits a fixnum again — so the box does not widen the value space."
 
 if [ "$fails" != 0 ]; then
   echo "word-arm-i61: $fails failure(s)"

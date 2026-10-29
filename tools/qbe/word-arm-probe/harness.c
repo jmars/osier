@@ -76,6 +76,34 @@ long *q_Rt_x2eframe_x2denter(long nslots)
 }
 void q_Rt_x2eframe_x2dleave(void) { }
 
+/* AREA 4 (perf word-arm-area4): THE BOXING SEAT, STUBBED AS A CONTROL.
+ *
+ * The emitter's fixnum writer now branches on a round trip (`w << 3 >> 3 == w`)
+ * and calls `Rt.boxInt` when the word does not fit i61 — so every probe whose
+ * defun closes with a DYNAMIC `mknum` (veclen's `mknum(veclen(v))`, rec's
+ * `mknum(veclen(rec) - 1)`, str's) references the seat and the module would not
+ * LINK without a definition here.  It is defined UNCONDITIONALLY, outside the
+ * PROBE_* blocks, for exactly that reason.
+ *
+ * IT MUST NEVER BE REACHED, and that is an assertion rather than a hope: every
+ * value these probes box is a COUNT (2, 3, 4), which fits i61 with room to
+ * spare, so the round trip HOLDS and the fixnum branch is taken.  A stub that
+ * answered a plausible value would hide a regression that started boxing them —
+ * a `mknum` of a length is exactly the case that must stay inline — so this one
+ * says so and exits.  Same discipline as the frame stubs: it exists so the probe
+ * can LINK, and it is loud so it cannot silently become part of the answer.
+ *
+ * THE RETURN SHAPE is `:val` = `align 8 { l }`: one eightbyte, INTEGER class, so
+ * SysV returns it in RAX and this C `struct Val` matches QBE's own lowering. */
+struct Val q_Rt_x2eboxInt(long n)
+{
+    fflush(stdout);
+    fprintf(stderr,
+            "word-arm-probe: Rt.boxInt REACHED with %ld - the probe's word must fit i61, so the ROUND-TRIP CHECK is boxing a count (a regression)\n",
+            n);
+    exit(1);
+}
+
 /* The last block the seat handed out, and its BODY address — the harness
  * compares the emitter's untagged value against this, which is the one
  * NON-VACUOUS check of the seat convention (the emitter never writes a header,
