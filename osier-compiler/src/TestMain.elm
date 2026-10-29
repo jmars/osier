@@ -16302,8 +16302,16 @@ andProbe =
 
 {-| perf VR3b2 — THE AREA-2b PROBES: a boolean literal (an IMMEDIATE under the
 word arm — `...011` / `...100`, no payload word), and a fixnum literal ONE PAST
-i61 (`2^60`), which must be REFUSED rather than truncated: boxing it is area 4's
-overflow path, which does not exist yet.
+i61 (`2^60`), which must be REFUSED rather than truncated.
+
+THE REFUSAL THAT FIRES NOW IS THE 2^53 DOMAIN GUARD, NOT THE i61 BOUNDARY, and
+boxing EXISTS (VR3d corrected this note: area 4 landed, `storeWordCell`'s fixnum
+arm boxes through `boxWordInt`, and the real big literals — the `intbig` rows,
+`bigMkProbe` — are pinned as boxing).  What this probe reaches is the emitter's
+own backstop: a raw-word `LNumber` above 2^53 with no lexical provenance cannot
+be rebuilt exactly from a host double, so it refuses BY NAME ("compiler bug or a
+probe") instead of emitting a rounded constant.  The row below pins that
+message.
 -}
 boolProbe : Defun
 boolProbe =

@@ -1351,11 +1351,15 @@ wordLayout =
 
 -- ==================== THE WORD ARM'S FIXNUM RANGE (VR3b2) ====================
 -- A word-arm fixnum is an i61: the low 3 bits are the tag, so a value outside
--- [-2^60, 2^60-1] does not fit and must be BOXED onto the heap — worklist area
--- 4's overflow path, which does not exist yet.  These two bounds are what let a
--- COMPILE-TIME literal be decided statically: inside the range `n * 8` is an
--- exact i64 (no truncation, no overflow), outside it the emitter refuses the
--- literal by name instead of silently dropping its top three bits.
+-- [-2^60, 2^60-1] does not fit the tag-shifted word.  SINCE AREA 4 (perf
+-- word-arm-area4) such a value is BOXED onto the heap — the overflow path
+-- EXISTS, `storeWordCell`'s fixnum arm emits the `n * 8` round-trip test and
+-- calls `boxWordInt` when it fails, and `mknum` boxes too — so this bound no
+-- longer decides "refuse"; it decides WHICH PATH a value takes.  What it still
+-- decides statically is the COMPILE-TIME literal: inside the range `n * 8` is an
+-- exact i64 (no truncation, no overflow), so an in-band literal is emitted as
+-- the fixnum shift, and a literal ABOVE 2^53 is rebuilt from its digits rather
+-- than from a host double (the exact-parser work L3-U1 made legal).
 --
 -- The bound is EXCLUSIVE IN MAGNITUDE and stated once: a word-arm fixnum is an
 -- `n` with `-wordFixnumLimit <= n < wordFixnumLimit`, i.e. 2^60.  It is not
@@ -1366,19 +1370,20 @@ wordLayout =
 -- `2^60` literal was emitted as `n * 8` instead of being refused.  A bound whose
 -- two spellings are the same number cannot express a range.
 --
--- L3-U1 NOTE: the product below was originally the only way to SPELL 2^60 (our
--- own frontend rejected a 19-digit literal outright: "err parse failed" from
--- the self-host emit, every Elm-side gate green — MEASURED at VR3b2).  The
--- exact parser makes the plain literal legal now, but re-spelling it is
--- deliberately NOT done here: `abi-fingerprint.sh`'s `gc:layout` component
--- digests this declaration's TEXT, so the re-spelling moves the committed
--- seed's ABI marker and makes `tools/qbe-bootstrap.sh` REFUSE — measured, for a
--- change that moves no layout NUMBER (2^60 either way).  The re-spelling
--- belongs in the commit that re-freezes the seed, not in a parser unit.
+-- RE-SPELLED AT VR3d (the flip), which is the commit this note has been
+-- deferring to: the product below was originally the only way to SPELL 2^60
+-- (our own frontend rejected a 19-digit literal outright: "err parse failed"
+-- from the self-host emit, every Elm-side gate green — MEASURED at VR3b2).  The
+-- exact parser makes the plain literal legal, and it is now written as one
+-- because a bound whose two spellings differ in kind invites the question this
+-- note kept answering.  THE COST IS PAID IN THE SAME COMMIT: `gc:layout`
+-- (`layout-census.sh --marker`) parses `name =` / `    <digits>` pairs, so the
+-- re-spelling ADDS this constant to the census block and moves the ABI marker —
+-- which is why `wordFixnumLimit` joined the census's MID_ONLY_NAMES and the
+-- seed was re-frozen with it.  Nothing about the NUMBER moved (2^60 either way).
 wordFixnumLimit : Int
 wordFixnumLimit =
-    -- 2^60, spelled as a product (see the note above).
-    1024 * 1024 * 1024 * 1024 * 1024 * 1024
+    1152921504606846976
 
 {-| DOES A BIG LITERAL FIT THE WORD ARM'S i61 FIXNUM?  DECIDED ON THE DIGITS.
 
