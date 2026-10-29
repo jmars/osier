@@ -726,6 +726,13 @@ this row is a floor over the corpus and not a proof that every site is right.
    BOTH from 118 to 102 — so streams are covered by THIS row, not by the
    classifier, and this row is the only place they are RUN.
 
+5. **IT DOES NOT REACH THE GATE'S `intproc` ROWS AT ALL** — `intcorner`,
+   `intbig` and `intpow` register no `run`/`run2`/`run_io` check, so no corpus
+   vector touches them.  Those rows are the word arm's 11 RED gate rows and
+   they are measured separately (see THE WORD-ARM GATE PASS below); the
+   corpus is not their oracle and `BOTH 125` must not be read as covering
+   them.
+
 ### The table
 
 `VECS` is the number of argument vectors run for the group; `RC` is the exit code
@@ -857,6 +864,99 @@ both arms returned; `B` is the byte length of the byte-identical stdout.
   taskattempt              1    0        identical, 7 B
   taskpure                 1    0        identical, 3 B
   taskseq                  1    0        identical, 2 B
+```
+
+## THE WORD-ARM GATE PASS (flip-prep): 11 ROWS THE CORPUS CANNOT SEE, AND ALL 11 ARE RED
+
+`QBE_VALREP=word tests/elm-fixtures/run-elm-gate.sh`, from the REPO ROOT, is the
+ONE instrument that runs the gate's non-corpus executable rows on the word arm.
+The corpus run above cannot see any of this BY CONSTRUCTION: `intproc`'s rows
+register no `run`/`run2`/`run_io` check, so no vector in the corpus manifest
+reaches them — `BOTH 125 / IDENTICAL 125` is silent about every row below.
+
+| the same gate, both arms, same tree | result |
+| --- | --- |
+| default (val) arm | **PASS=190 FAIL=0**, rc 0 (149 s) |
+| `QBE_VALREP=word` | **PASS=179 FAIL=11**, rc 1 |
+
+190 − 11 = 179, so the eleven are the WHOLE of the word arm's gate gap today.
+Every one is a LOUD refusal by design (VR3b2: the arm must fail, never
+half-work). **No silent wrong answer is in this list** — that is the finding
+this table exists to carry, and it is why the gap is a decision rather than a
+defect hunt.
+
+### Class 1 — EIGHT `intbig` ROWS, REFUSED AT **EMIT** (AREA 4, the i61 overflow/boxing path)
+
+All eight entry functions of `tests/elm-fixtures/intbig.elm` stop in the
+emitter, so the gate fails them at BUILD (`qbe-mk: compile failed`) before any
+run. The text is ONE message per row, differing only in the literal it names:
+
+```
+err qbe: QBE_VALREP=word is NOT IMPLEMENTED (perf VR3b2): the emitter cannot
+lower AREA 4 (ARITHMETIC — THE i61 OVERFLOW/BOXING PATH) — the literal
+<LITERAL> — it is above 2^53, so its i61 range check and its `n * 8` fixnum
+shift have to be done in the exact domain (AREA 4); emitting them from a host
+number would silently round it — the word arm stops at its un-ported constructs
+instead of emitting half-word code (nothing was emitted).
+```
+
+| row (entry, args) | word arm | val arm (measured, the gate's own expectation) |
+| --- | --- | --- |
+| `Intbig.maxi64` | EMIT refusal, literal `9223372036854775807` | rc 0 `9223372036854775807` |
+| `Intbig.mini64` | EMIT refusal, literal `-9223372036854775808` | rc 0 `-9223372036854775808` |
+| `Intbig.above53` | EMIT refusal, literal `9007199254740993` | rc 0 `9007199254740993` |
+| `Intbig.bigmul` | EMIT refusal, literal `1152921504606846975` | rc 0 `1152921504606846975` |
+| `Intbig.bigdiff` | EMIT refusal, literal `1152921504606846975` | rc 0 `1152921504606846976` |
+| `Intbig.hexmax` | EMIT refusal, literal `9223372036854775807` | rc 0 `9223372036854775807` |
+| `Intbig.patmatch 9223372036854775807` | EMIT refusal, literal `9223372036854775807` | rc 0 `1` |
+| `Intbig.patmatch 5` | EMIT refusal, literal `9223372036854775807` | rc 0 `0` |
+
+WHY THEY REFUSE: a word-arm fixnum IS an i61 (`wordTagShape`/`wordFixnumLimit`),
+so an Int literal above 2^53 needs the i61 range check AND the `n * 8` shift
+done in the exact domain; a value that does not fit has to be BOXED, and that
+heap cell is AREA 4's overflow path, which does not exist. The `patmatch` rows
+refuse for the same reason in a different seat (the pattern literal is in the
+same defun).
+
+### Class 2 — TWO `intcorner` ROWS AND ONE `intpow` ROW, REFUSED AT **RUNTIME**
+
+These three EMIT on both arms and then die at `mknum`'s round-trip check: a
+result inside i64 but outside i61 has no fixnum encoding.
+
+| row | word arm | val arm |
+| --- | --- | --- |
+| `Intcorner.wrapmul 1` | runtime refusal, rc 1: `qbe-rt: word arm: mknum overflow - the value does not fit the i61 fixnum (its top three bits would be dropped by the tag shift) and boxing onto the heap is AREA 4's overflow path, which does not exist yet. Refusing instead of truncating.` | rc 0 `0` — i64 two's complement: `1024^6 * 16` = 2^64, wrapping to 0 |
+| `Intcorner.minbyneg 1` | runtime refusal, rc 1: the SAME `mknum overflow` text (the 2^63 intermediate has no fixnum) | rc 1 `qbe-rt: division overflow: 'INT64_MIN // -1' is 2^63, which is not an i64` — the arms HALT FOR DIFFERENT NAMED REASONS, which is a representation difference, not a behaviour one: both refuse, the messages differ |
+| `Intpow.powbig` | runtime refusal, rc 1: the SAME `mknum overflow` text | rc 0 `4052555153018976267` (3^39 — below INT64_MAX, above 2^61) |
+
+Note the shape `minbyneg` exposes: the word arm's failure PRECEDES the val arm's
+own named halt. A pin that merely matched rc would call the row identical; the
+gate compares the diagnostic, which is why it does not.
+
+### What this table is FOR — and what this unit did NOT do
+
+The flip checklist says the gate's default arm flips with `run.js:363`, so on
+flip day this row is 11 red unless (a) AREA 4 (i61 boxing) is implemented or
+(b) these 11 rows are explicitly pinned `QBE_VALREP=val`. **Both are the
+OWNER's call.** This unit did neither: it did not port AREA 4, it did not pin a
+row, and it did not change the gate. The pin was not taken partly because it
+would HIDE the decision inside the instrument that should carry it, and partly
+because the list is small enough to decide on directly: one root (the i61 fixnum
+domain), two classes (8 rows can never emit until boxing exists; 3 rows emit and
+refuse at the fixnum boundary).
+
+ONE COUNT CORRECTION, because the arithmetic has to close: the corpusrun review
+recorded "intbig's nine rows". MEASURED, `intbig` registers EIGHT `intproc` rows
+(`maxi64 mini64 above53 bigmul bigdiff hexmax patmatch[9223372036854775807]
+patmatch[5]`, run-elm-gate.sh:868-878) and all eight are red; 8 + 2 `intcorner`
++ 1 `intpow` = 11 = `FAIL=11`, and `PASS=179` is `190 - 11`. The review's named
+list was right about WHICH rows; only its row count was one high.
+
+Reproduce (either line; the second is the one that decides the flip):
+
+```
+QBE_VALREP=word tests/elm-fixtures/run-elm-gate.sh | grep -E '^FAIL|^PASS='   # PASS=179 FAIL=11
+tests/elm-fixtures/run-elm-gate.sh               | grep -E '^PASS=|^FAIL'    # PASS=190 FAIL=0
 ```
 
 ## THE ENTRY-ARGS ROOT GAP (perf word-arm-corpusrun): THE DOC WAS WRONG, AND IN THE DIRECTION THAT DROPS LIVE VALUES
