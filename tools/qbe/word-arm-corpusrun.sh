@@ -257,6 +257,12 @@ while IFS='|' read -r id name entry args stdin kind label; do
     res="STDOUT"
   else
     res="SAME rc=$vrc bytes=$(wc -c < "$WORK/runs/$id.val.out")"
+    # A SIGNAL DEATH IS NOT AGREEMENT (flip-prep, review NICE 2).  rc >= 128 means
+    # the process was KILLED (134 SIGABRT, 136 SIGFPE, 139 SIGSEGV), so neither
+    # arm produced the program's answer: a shared crash must not be credited as
+    # "identical".  It is carried in the result field and the report counts it
+    # separately (and fails on it); the comparison itself stays rc+stdout.
+    [ "$vrc" -ge 128 ] && res="$res CRASH=$vrc"
   fi
   # STDERR is compared INFORMATIONALLY, never fatally (the arms are allowed
   # different diagnostics — that is a representation difference, not a
@@ -310,14 +316,23 @@ def base(res):
     # the stderr comparison rides on the same field; it is informational
     return res.split(" err=")[0]
 
-def bad(r):
+def differing(r):
+    # the two arms returned different rc or stdout bytes
     return not r["res"].startswith("SAME")
+
+def crashed(r):
+    # both arms died on the SAME signal: rc >= 128 on an arm-equal code
+    return "CRASH=" in r["res"]
+
+def bad(r):
+    return differing(r) or crashed(r)
 
 ran = sorted({r["name"] for r in rows if r["name"] in both})
 not_run = [n for n in both if n not in ran]
 
 groups_ok = [n for n in ran if all(not bad(r) for r in rows if r["name"] == n)]
-groups_bad = [n for n in ran if n not in groups_ok]
+groups_bad = [n for n in ran if n not in groups_ok and any(differing(r) for r in rows if r["name"] == n)]
+groups_crash = [n for n in ran if n not in groups_ok and n not in groups_bad]
 
 print("word-arm corpus run: BOTH 125-group column, RUN on both arms and DIFFED")
 print("  groups the census calls BOTH  %3d" % len(both))
@@ -326,6 +341,8 @@ print("  ... RUN on both arms         %3d  (%d argument vectors, from the gate's
       % (len(ran), nvec))
 print("  ... IDENTICAL                %3d  (exit code AND stdout bytes)" % len(groups_ok))
 print("  ... DIFFERING                %3d" % len(groups_bad))
+print("  ... CRASHED on BOTH arms     %3d  group(s) (rc >= 128: a shared SIGNAL"
+      " DEATH is counted as a FAILURE, never as agreement)" % len(groups_crash))
 print("  SAME-ERROR (not runnable)    %3d  (both arms refuse: not an arm gap)"
       % len(same_error))
 print("  WORD-BLOCKED (not runnable)  %3d" % len(blocked))
@@ -348,14 +365,23 @@ def first_diff(rid):
     return ("first difference at byte %d: val %r vs word %r (val %d B, word %d B)"
             % (i, A[i:i+24], B[i:i+24], len(A), len(B)))
 
-if groups_bad:
-    print("\nDIFFERING GROUPS — the two representations disagree on a program's output")
-    for n in groups_bad:
+if groups_bad or groups_crash:
+    print("\nFAILING GROUPS — the two representations disagree on a program's output,"
+          " or both arms died on the same signal (a crash is not an answer)")
+    for n in sorted(set(groups_bad) | set(groups_crash)):
         for r in rows:
             if r["name"] != n or not bad(r):
                 continue
             print("  %-28s [%s] %s" % (n, r["args"] or "no args", base(r["res"])))
-            if base(r["res"]) == "STDOUT":
+            if crashed(r):
+                print("      BOTH ARMS DIED ON A SIGNAL (%s) — a crash is not an"
+                      " output, so this is NOT agreement; the word-arm stderr says"
+                      " why:" % base(r["res"]).split("CRASH=")[-1])
+                err = os.path.join(W, "runs", "%d.word.err" % r["id"])
+                if os.path.exists(err):
+                    line = open(err, errors="replace").readline().strip()
+                    print("      word stderr: " + (line or "<empty>")[:200])
+            elif base(r["res"]) == "STDOUT":
                 print("      " + first_diff(r["id"]))
             else:
                 err = os.path.join(W, "runs", "%d.word.err" % r["id"])
@@ -387,7 +413,11 @@ for n in ran:
     if len(rs) == 1:
         r = rs[0]
         tag = "" if r["label"] == "gate-row" else "  (%s)" % r["label"]
-        if r["res"].startswith("SAME"):
+        if crashed(r):
+            print("  %-24s %-4d %-8s CRASHED on BOTH arms (%s) — NOT identical%s"
+                  % (n, 1, base(r["res"]).split()[1].split("=")[1],
+                     base(r["res"]).split("CRASH=")[-1], tag))
+        elif r["res"].startswith("SAME"):
             rc = base(r["res"]).split()[1].split("=")[1]
             nb = base(r["res"]).split("bytes=")[-1]
             print("  %-24s %-4d %-8s identical, %s B%s" % (n, 1, rc, nb, tag))
@@ -404,6 +434,6 @@ if show == "vectors":
     for r in rows:
         print("  %-24s %-22s %s" % (r["name"], r["entry"], r["res"]))
 
-sys.exit(1 if (groups_bad or build_fail or not_run) else 0)
+sys.exit(1 if (groups_bad or groups_crash or build_fail or not_run) else 0)
 PY
 exit $?

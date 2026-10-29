@@ -643,7 +643,7 @@ vendored qbe, linked with cc, and RUN on both ways.
 | RUN on both arms | **125** (126 runs: `sub` is registered twice) |
 | **IDENTICAL** — same exit code AND byte-identical stdout | **125** |
 | DIFFERING | **0** |
-| crashed or hung (a timeout is a FAILURE, not a skip) | **0** |
+| crashed or hung (a timeout, or a common rc >= 128 signal death on both arms, is a FAILURE — never agreement) | **0** |
 | stderr also byte-identical | **126 / 126 runs** |
 | `SAME-ERROR` groups (not runnable on either arm) | 34 |
 
@@ -669,6 +669,21 @@ which are `compile_clean` groups run with no argument — see the convention not
   behave the same way (`rowgadt_select`/`rowgadt_setx` die with the same
   `non-exhaustive case` and rc 1), but the row is marked `no-vector` in the table
   so nobody reads it as a driven run.
+  **AND THE DETERMINISM HERE IS THE ALLOCATOR'S, NOT THE ABI'S.**  These
+  entries declare `arity >= 1`, so `Rt.main` reads `a1 …` out of `abuf`
+  cells that NOTHING EVER WROTE (no argument was parsed): `abuf =
+  malloc(648)` (`runtime.mid:8525`) is never `memset`, and the count cell
+  makes the registered region `nargs` Values, so the cells the entry reads
+  are the region's own unwritten bytes on both arms.  Both arms agree today
+  only because a fresh `malloc` hands back ZEROED pages, which both
+  representations read as the number 0.  That is a property of THIS libc's
+  fresh-block behaviour, not a guarantee of the ABI: a recycled block, a
+  different allocator or a future arena could hand the two arms different
+  bytes, and this row would then differ for a reason that says nothing about
+  either representation.  So the six `no-vector` rows' agreement is NOT
+  evidence about the entry-argument path — the 120 driven vectors are —
+  and a flip-time change here should be read as an allocator observation
+  first.
 * **CWD IS THE REPO ROOT**, which is the gate's own convention and a hard
   requirement: eight fixtures resolve repo-root-relative paths (`iofile` writes
   `tests/elm-fixtures/out/hello.out`), and the gate refuses to run anywhere else
@@ -677,6 +692,21 @@ which are `compile_clean` groups run with no argument — see the convention not
   (the gate lets a `natrun` row inherit stdin; that is not a property of the
   program).  **TIMEOUT 20 s, and a timeout is a FAILURE** — a wrong count or
   stride LOOPS instead of crashing, and a gate that hangs reports nothing.
+  **AND SO IS A SHARED SIGNAL DEATH.**  A row whose two arms return the SAME
+  rc >= 128 (134 SIGABRT, 136 SIGFPE, 139 SIGSEGV) is not a comparison: both
+  arms produced no answer, so it cannot be credited as identical.  The script
+  carries the rc in the result field (`… CRASH=N`), counts it on its own
+  line (`CRASHED on BOTH arms`), says `CRASHED on BOTH arms (N) — NOT
+  identical` in the table, and fails.  MEASURED FAIL-ABLE on a scratch tree
+  with ONE shared store rewritten to address 0 in `Rt.main`
+  (`wstore(0, 1, entry)`), so that EVERY run dies 139 on BOTH arms:
+
+      without the flag   IDENTICAL 125 / DIFFERING 0, rc 0  — all 126 run(s)
+                         read as agreement, under a `crashed or hung 0`
+                         headline
+      with the flag      IDENTICAL 0 / DIFFERING 0 / CRASHED on BOTH arms 125
+                         group(s) (126 run(s)), table rows
+                         `CRASHED on BOTH arms (139) — NOT identical`, rc 1
 * **STDERR IS COMPARED, INFORMATIONALLY, NOT FATALLY.**  The arms are allowed
   different diagnostics; what is asserted is exit code + stdout.  It is measured
   because a row whose only observable is its diagnostic (`execmal`) would
@@ -1020,16 +1050,38 @@ Values at the layout's stride).
 
 **No fixture can force a scavenge inside `[rootPush, rt_callN]` with today's
 knobs**, so the root-coverage half is closed BY CONSTRUCTION (count == region ==
-the cells the writer filled, pinned per arm) and not by a collection. Measured
-reasoning, not a guess: the window's Mid-heap allocations are `Rt.argvInstall`'s
-per-argv-entry string + cons cells — O(1) KB for the 16-arg maximum — while the
-nursery is at least 1 MB (`QBE_MIDGC_YOUNG_MB`'s smallest non-zero value is 1;
-the default is `clamp(heapBytes/8, 4 MB, 512 MB)`, and it is clamped to the old
-ceiling). A fixture that churns AFTER the entry is called proves nothing here:
-the args are in the callee's rooted frame by then, so such a row would be a TEST
-THAT CANNOT FAIL, which is why it was not written. What would observe it: a
-collect-at-next-allocation stress knob (none exists) or an `argvInstall` that
-allocated megabytes (it does not).
+the cells the writer filled, pinned per arm) and not by a collection.
+
+THE INVARIANT THAT ACTUALLY HOLDS: the window `[rootPush, rt_callN]` contains
+**ZERO Mid-heap allocations** whenever the root is non-empty. Read from the code,
+per conjunct:
+
+* `entry_nargs > 0` REQUIRES `argvMode == 0` — `entry_nargs` is
+  `mkbool(argvMode != 0) ? 0 : nargs` (`runtime.mid:8526`), so a non-empty root
+  means argv mode is OFF.
+* At mode 0 `Rt.argvInstall` returns at its FIRST branch (`runtime.mid:3352-3354`):
+  `vecstore(ent, 0, mknil); return mknil;` — one store into the ALREADY-EXISTING
+  `*argv*` entry vector, allocating nothing. The per-argv string + cons path
+  (`Rt.argvGo`) runs only when `entry_nargs == 0`, i.e. when the root is EMPTY
+  and there is nothing for it to cover.
+* Nothing else in the window reaches the collector: GC triggers fire ONLY inside
+  `gcAlloc` — the young-fill scavenge (`runtime.mid:5891`) and the full-collect
+  threshold (`runtime.mid:5877`). The window's two remaining allocations
+  (`fslot`, `modelslot`) are `rawcall malloc`, i.e. LIBC, and cannot trigger a
+  Mid collection.
+
+So the argument does not depend on the nursery's size at all: no
+`QBE_MIDGC_YOUNG_MB` value and no allocation volume can change it. (This
+paragraph previously reasoned "O(1) KB of argvInstall allocations vs a nursery of
+at least 1 MB" — that is the WRONG MODE'S path, the one taken when the root is
+empty. The conclusion was right and the mechanism was not; the zero-allocation
+invariant is strictly stronger and survives a future nursery knob.)
+
+A fixture that churns AFTER the entry is called proves nothing here: the args are
+in the callee's rooted frame by then, so such a row would be a TEST THAT CANNOT
+FAIL, which is why it was not written. What would observe it: a forced-collection
+stress knob that fires at a chosen point (`gcAlloc` is the only trigger, and at
+`argvMode == 0` the window never enters it) — none exists.
 
 Also recorded, because it is adjacent and NOT this class: the window
 `[Rt.parseArgsGo, rootPushValueArray]` is unrooted on BOTH arms (the float cells
