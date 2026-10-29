@@ -739,8 +739,9 @@ wordArmUnportedList exp =
 
         Lit (LNumber _) ->
             -- AREA 2, THE FIXNUM IMMEDIATE.  `lowerLitWord` owns the i61 range
-            -- decision (it refuses an out-of-range literal by NAME, as area 4's
-            -- boxing gap) so there is one place that decides, not two.
+            -- decision — a literal past the printer's exact zone is rebuilt from
+            -- limbs rather than refused (perf word-arm-area4) — so there is one
+            -- place that decides, not two.
             []
 
         Lit (LNumberBig _) ->
@@ -5524,11 +5525,13 @@ wordField32Refusal =
     "qbe-rt: word arm: i32 field read on a word that is not a heap object (...001) - a fixnum's value lives in a register and has no field, and an immediate (nil/true/false/error) has no body. Refusing."
 
 
-{-| The `mknum` overflow refusal: a word-arm fixnum is an i61, so a value whose
-top three bits survive the shift cannot be represented.  ASCII only. -}
-wordFixnumRefusal : String
-wordFixnumRefusal =
-    "qbe-rt: word arm: mknum overflow - the value does not fit the i61 fixnum (its top three bits would be dropped by the tag shift) and boxing onto the heap is AREA 4's overflow path, which does not exist yet. Refusing instead of truncating."
+-- THE `mknum` OVERFLOW REFUSAL IS GONE (perf word-arm-area4).  It used to say
+-- "boxing onto the heap is AREA 4's overflow path, which does not exist yet";
+-- the path exists, so `storeWordCell`'s failure branch BOXES the wrapped i64 and
+-- nothing emits that message any more.  The definition is deleted rather than
+-- left standing: a refusal string no code path can emit reads like a behaviour
+-- the runtime still has, which is exactly the kind of stale text this unit's
+-- AREA 4 review asked to be cleaned up.
 
 
 {-| AREA B: the loud refusal a payload read emits when the word it was handed is
@@ -12485,9 +12488,9 @@ lowerArith prim args dest s =
         -- instead read their operands with `payload` (a fixnum's `SAR`, a heap
         -- object's body load) and write the result with `mknum`, which is the
         -- i61 shift AND its round-trip check: `+ - *` WRAP at i64 (L3's
-        -- semantics) for every result that fits, and a result outside i61
-        -- REFUSES LOUDLY by name instead of silently dropping its top three
-        -- bits — the boxed overflow path is AREA 4's and does not exist yet.
+        -- semantics) for every result that fits, and a result outside i61 is
+        -- BOXED onto the heap by that same check's failure branch (perf
+        -- word-arm-area4), so the value is never silently truncated.
         lowerArgsToSlots args s
             |> Result.andThen (\( slots, s1 ) -> rtPrimSlots prim slots dest s1)
 

@@ -2687,9 +2687,21 @@ checks rt rawMidText =
                     * 16
                     == 16777216
                     -- the SCAN LADDER in the code is `heapKindScanned`'s set,
-                    -- over every ValTag integer this file defines.
-                    && List.filter RtLayout.heapKindScanned [ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14 ]
+                    -- over every ValTag integer this file defines — and over the
+                    -- WHOLE code space, not just the codes that exist today.  A
+                    -- REVIEW FIX: the list stopped at 14, so a SIXTEENTH code
+                    -- added to `heapKindScanned` (the mask is 15, so 15 is
+                    -- reachable) would have been invisible to this row while
+                    -- `Rt.kindHdr` kept writing a RAW header for it — the exact
+                    -- drift the row exists to prevent, in the third place the
+                    -- scanned set is stated.
+                    && List.filter RtLayout.heapKindScanned [ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 ]
                     == [ 4, 6, 9, 10, 14 ]
+                    -- ...and the list above is the WHOLE code space only while
+                    -- the mask is four bits.  Widen it and this row goes red
+                    -- instead of silently covering a prefix.
+                    && RtLayout.heapKindMask
+                    == 15
 
             _ ->
                 False
