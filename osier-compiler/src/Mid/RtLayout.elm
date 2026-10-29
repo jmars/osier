@@ -1249,6 +1249,19 @@ valLayout =
 --      names block is a code-1 raw word array, and the naming lie is stated at
 --      the site: code 1 buys the SCAN BIT, which is the only property the
 --      collector reads.  `Rt.recInsert` needs no twin (it forwards).
+--      THE RECORD-SIDE CENSUS IS CLOSED (perf word-arm-records THE CEILING,
+--      Part B).  FOURTEEN record shapes probed directly on the word arm —
+--      literal, walk read, positional read, closed update, open-row update,
+--      insertion, duplicate labels, `{ x, y }` pattern, `Record.remove`, a
+--      nested literal, a record in a list, `==` on records, `{}` field access,
+--      and a field of a call result — and THIRTEEN EMIT.  The one refusal,
+--      `{}.x`, is `err type error at 2:8: missing field x` on BOTH arms: a
+--      LANGUAGE rule, not an arm refusal, so it is not this arm's to port.  So
+--      there is NO remaining record-side construct refused by name, which is
+--      what the empty `wordArmDefunRefusals` below says and what the behavioural
+--      rows confirm: `word-arm-diff` 21/21 and the `rec`/`recupd` heap ladders
+--      green on both arms at h1/h2/h4/default WITH real collections (val
+--      36/28/18/0 and 46/36/26/3, word 30/18/8/0 and 44/32/20/1).
 --      `wordArmDefunRefusals` IS EMPTY — the refusal LIST is empty, which is a
 --      statement about the classifier's by-name gate and NOT about correctness.
 --      The correctness statement is the paragraph above: the churn row is red at
