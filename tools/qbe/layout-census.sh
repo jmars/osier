@@ -89,8 +89,16 @@ need() { command -v "$1" >/dev/null 2>&1 || { printf 'layout-census: %s not foun
 # VR3c AREA 1 row parses runtime.mid's own `// KIND-CONTRACT:` rows and compares
 # them with these constants, so a stale duplicate is a RED row rather than a
 # silently different offset.
+# (VR3d) `wordFixnumLimit` JOINED THIS LIST WITH ITS RE-SPELLING.  It was
+# invisible to the census before: the parse takes `name =` followed IMMEDIATELY
+# by `    <digits>`, and the old spelling put a comment line between them, so the
+# constant fell out of the parse (and out of the name set, silently).  Written as
+# one literal it parses, which is the point: the boxing boundary the flip turns
+# on is now a NUMBER IN THE ABI MARKER rather than a product the marker could not
+# see.  MID_ONLY because (ZIGHOST Z6) there is no Zig declaration to attest it
+# against any more.
 MID_ONLY_NAMES="descArityOffset descCacheOffset descCodeOffset descNcapsOffset descTotalBytes \
-heapKindMask heapKindShift \
+heapKindMask heapKindShift wordFixnumLimit \
 direntNameOffset maxArity \
 metaArityOffset metaCodeOffset metaNameOffset metaSizeBytes \
 epChainOpIdx epChainPipeIdx epChainWords epCmdArgcIdx epCmdArgvIdx epCmdNredirsIdx epCmdRedirsIdx epCmdSubIdx epCmdWords epKindAppend epKindDup epKindHdoc epKindHstr epKindIn epKindOut epOpAnd epOpOr epOpSeq epPipeCmdArrIdx epPipeCmdCountIdx epProgChainsIdx epProgCountIdx epRedirBodyIdx epRedirDupfdIdx epRedirFdIdx epRedirKindIdx epRedirPathIdx epRedirTmpfdIdx epRedirWords"
@@ -116,7 +124,7 @@ REGEX_NAMES=""
 all_names() {
   printf '%s\n' "$MID_ONLY_NAMES" "$COMPTIME_NAMES" "$REGEX_NAMES" \
     abiAlign i32Bytes lenFieldOffset lenFieldWord payloadBase \
-    tagBoolean tagCons tagError tagFloat tagLambda tagMark tagNil tagNumber \
+    tagBigInt tagBoolean tagCons tagError tagFloat tagLambda tagMark tagNil tagNumber \
     tagPrim tagRecord tagStream tagString tagSymbol tagVector \
     valSizeBytes valuePayloadWords valueTagBytes wordBytes | tr ' ' '\n' | grep -v '^$' | sort
 }
@@ -125,7 +133,12 @@ all_names() {
 mid_values() {
   awk '
     /^[a-z][a-zA-Z0-9_]* =$/ { name = substr($0, 1, length($0) - 2); pend = 1; next }
-    pend && /^    [0-9]+$/   { print name "=" ($0 + 0); pend = 0; next }
+    # $1, not ($0 + 0): awk number-to-string conversion uses CONVFMT (%.6g),
+    # so a 19-digit constant would be PRINTED as 1.15292e+18 — a lossy value in
+    # a block whose whole job is to state the numbers.  The field is the digits
+    # verbatim, which is also what makes the digest a digest of the DECLARED
+    # text (2^60 as 1152921504606846976, not as a float).
+    pend && /^    [0-9]+$/   { print name "=" $1; pend = 0; next }
     { pend = 0 }
   ' "$MID" | sort
 }
