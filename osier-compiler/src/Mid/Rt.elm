@@ -2537,10 +2537,33 @@ safepoint arm selfKey selfArity e =
             -- allocates nothing, and `wordMkAllocSeat` still says so.
             arm && (RtLayout.wordLitAllocSeat RtLayout.tagSymbol /= Nothing)
 
+        Lit (LNumberBig digits) ->
+            -- AREA 4 (perf word-arm-area4): THE THIRD PLACE THE `mk*`-AS-
+            -- SAFEPOINT RULE HOLDS, and the one the table CANNOT state.  A big
+            -- literal outside i61 is BOXED on the word arm
+            -- (`storeWordCell`/`boxWordInt` -> `Rt.boxInt`), so a defun whose
+            -- only allocation is such a literal would classify FRAME-FREE and
+            -- drop its roots.
+            --
+            -- THE ANSWER IS EXACT RATHER THAN ARM-WIDE, and it has to be,
+            -- because `wordLitAllocSeat` is keyed by CODE and BOTH number
+            -- literal forms share `tagNumber` while differing here: `LNumber`
+            -- is always inside i61 (the frontend's small arm stops at 2^53) and
+            -- never allocates; `LNumberBig` allocates exactly when it does not
+            -- fit.  So the decision is `RtLayout.bigLiteralFitsFixnum` — the
+            -- SAME lexical test the emitter uses to choose between the fixnum
+            -- shift and the box, read from ONE place, so the classifier and the
+            -- emitter cannot disagree about a literal.
+            --
+            -- The val arm allocates nothing here (a 40-byte tag-plus-payload
+            -- store), so the answer is False there and the val emit does not
+            -- move.
+            arm && not (RtLayout.bigLiteralFitsFixnum digits)
+
         Lit _ ->
-            -- The IMMEDIATES: `mknum`/`mkbool` are shifts and a big number is
-            -- refused by name under this arm.  Nothing to allocate, so this is
-            -- the arm that keeps the answer from being "True for every literal".
+            -- The IMMEDIATES: `mknum`/`mkbool` are shifts and a small number is
+            -- inside i61 by construction.  Nothing to allocate, so this is the
+            -- arm that keeps the answer from being "True for every literal".
             False
 
         Var _ ->

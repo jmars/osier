@@ -1893,7 +1893,49 @@ checks rt rawMidText =
                     -- ALL NINE SEAT KEYS, OVER THE WORD LOAD.  Eight must be
                     -- ABSENT (they hold no Value across their own allocation;
                     -- for gcAlloc a registered frame would be a hazard).
-                    && List.all (\k -> not (Set.member k wordRt.allocating))
+                    -- ===== AREA 4 WEAKENED THIS INVARIANT, AND THE WEAKENING
+                    -- IS STATED RATHER THAN ABSORBED (perf word-arm-area4).
+                    --
+                    -- The invariant this row was built for — "a seat is not
+                    -- rooted BECAUSE it calls `gcAlloc`" — still holds: nothing
+                    -- here joins `allocating` for its own `gcAlloc` call.  But
+                    -- the SEAT SET moved for a different reason, and it moved
+                    -- for ALL NINE AT ONCE: every one of these bodies contains a
+                    -- `mknum` (`mknum(regionW)`, `mknum(0)`, `mknum(2)`,
+                    -- `mknum(yc1)`, ...), and under the word arm a `mknum` whose
+                    -- word does not fit i61 now BOXES instead of refusing — so
+                    -- `RtLayout.wordMkAllocSeat` answers `Just "Rt.boxInt"` for
+                    -- `tagNumber` and `unsafeSafepoint` roots any defun holding
+                    -- one.  That is the SAFE DIRECTION (over-approximating a
+                    -- frame costs a registration; under-approximating drops
+                    -- roots) and it is the same rule that already rooted
+                    -- `Rt.mkStream` — but it is a real cost and it is not
+                    -- free: every arithmetic defun in the runtime now opens
+                    -- with a pooled-frame call.
+                    --
+                    -- MEASURED, so this is not a reading.  The word arm's
+                    -- emitted `q_Rt_x2egcAlloc` now opens
+                    -- `%f =l call $q_Rt_x2eframe_x2denter(l 72)` (it did not
+                    -- before this unit), and `Rt.frame-enter` itself calls
+                    -- `rootPushValueArray`, so the frame IS a registered root
+                    -- region — zeroed by frame-enter's memset, so every slot it
+                    -- contributes to a scan is a well-formed number-0 Value.
+                    -- The evidence that this is sound rather than lucky is the
+                    -- LADDER, not the reasoning: `tools/qbe/word-arm-gcchurn.sh`
+                    -- is 20/20 green with collections val 46/44/36/32 vs word
+                    -- 44/46/36/32 on the recupd rungs and 0/0 on con/default,
+                    -- i.e. the collector is genuinely exercised and the two arms
+                    -- agree; and the corpus is 125/125 identical.
+                    --
+                    -- THE FOLLOW-UP THIS CREATES, named so it is not lost: a
+                    -- seat should not pay a frame for a `mknum` of a COUNT.  The
+                    -- cheap fix is a `mknum`-family spelling that ASSERTS the
+                    -- word fits i61 (no round trip, no boxing, no frame) for the
+                    -- sites that are provably counts and sizes.  That is a
+                    -- separate unit — it needs a checker row and a lowering row
+                    -- and it must emit the val arm byte-identically — and it is
+                    -- NOT done here.
+                    && List.all (\k -> Set.member k wordRt.allocating)
                         [ "Rt.allocKind"
                         , "Rt.allocRecord"
                         , "Rt.allocCons"
@@ -1902,15 +1944,20 @@ checks rt rawMidText =
                         , "Rt.allocRaw"
                         , "Rt.allocFloat"
                         , "Rt.gcAlloc"
+                        , "Rt.mkStream"
                         ]
-                    -- ... AND THE NINTH IS THE STATED EXCEPTION: `Rt.mkStream`
-                    -- MUST be rooted, because its `allocKind` call is its FIRST
+                    -- THE ROW'S ORIGINAL CLAIM, still asserted and still the
+                    -- point: the seat half is NOT what makes a caller root.
+                    -- `Rt.recAppend`/`Rt.recUpd` are rooted by their SEAT
+                    -- EDGES (`allocSeatDeps`), and that is what the two
+                    -- `rooted` calls above prove on the emitted text.
+                    && Set.member "Rt.boxInt" wordRt.allocating
+                    -- `Rt.mkStream` IS STILL THE ONE THAT MUST BE ROOTED FOR
+                    -- THE ORIGINAL REASON (its `allocKind` call is its FIRST
                     -- statement and it reads `payload(what,0)`/`payload(flags,0)`
-                    -- after it — the one seat that holds `:val`s across its own
-                    -- allocation.  Asserting it PRESENT is what stops a future
-                    -- reader from "restoring" it to frame-free to match the old
-                    -- invariant, which would create the defect.
-                    && Set.member "Rt.mkStream" wordRt.allocating
+                    -- after it), and it is asserted in the list above with the
+                    -- rest — so a future reader cannot "restore" it to
+                    -- frame-free to match the old invariant.
 
             _ ->
                 False
@@ -1961,6 +2008,105 @@ checks rt rawMidText =
                 False
         )
         )
+    , check "AREA 4 — THE BOXED INTEGER IS A SAFEPOINT IN EVERY PLACE IT CAN NOW ALLOCATE, BOTH DIRECTIONS, ON THE REAL WALKER (perf word-arm-area4)"
+        -- THE ENUMERATION THE UNIT OWES, and the reason it is a row rather than a
+        -- comment: `unsafeSafepoint` classifies a `.mid` TREE, while the
+        -- allocation this unit added is a call the EMITTER injects.  Every node
+        -- whose emitter can now allocate is enumerated here and each one is
+        -- probed on the REAL classifier (`Rt.loadArm`'s `direct` walker), on
+        -- BOTH arms, with the val arm asserted FALSE so the corpus cannot move.
+        --
+        --   RawMkValue tagNumber  -> `Rt.boxInt`      ALLOCATES (word)
+        --   Lit (LNumberBig ..)   -> `Rt.boxInt`      ALLOCATES when > i61
+        --   Lit (LNumberBig ..)   -> nothing          when inside i61
+        --   Lit (LNumber)         -> nothing          always
+        --   Lit (LFloat)          -> `Rt.allocFloat`  ALLOCATES (word)  [AREA 5]
+        --   Lit (LSymbol)         -> `Rt.allocSym`    ALLOCATES (word)  [R1]
+        --   Lit (LString)         -> `Rt.allocRaw`    ALLOCATES (both)  [frozen]
+        --   RawMkValue tagFloat   -> `Rt.allocFloat`  ALLOCATES (word)  [AREA 5]
+        --   RawMkValue tagString  -> nothing          (bytes inline)
+        --
+        -- The three AREA 4 probes are the new ones; the AREA 5/R1 ones are
+        -- carried here as the CONTROLS, because a row that only asserted the
+        -- new answers could pass with the whole `mk*`/`Lit` coupling broken.
+        ((case ( Rt.loadArm False rawMidText, Rt.loadArm True rawMidText ) of
+            ( Ok valRt, Ok wordRt ) ->
+                wordRt.direct mkNumProbe
+                    && not (valRt.direct mkNumProbe)
+                    && wordRt.direct bigLitProbe
+                    && not (valRt.direct bigLitProbe)
+                    -- THE CONTROL THAT MAKES THE PAIR FAIL-ABLE: a big literal
+                    -- that FITS must not be claimed to allocate.
+                    && not (wordRt.direct fitsBigLitProbe)
+                    && not (valRt.direct fitsBigLitProbe)
+                    -- and the pre-existing controls, unchanged
+                    && not (wordRt.direct intLitProbe)
+                    && wordRt.direct floatLitProbe
+                    && not (valRt.direct floatLitProbe)
+                    && wordRt.direct symLitProbe
+                    && not (valRt.direct symLitProbe)
+                    && wordRt.direct strLitProbe
+                    && valRt.direct strLitProbe
+                    && wordRt.direct mkFloatProbe
+                    && not (valRt.direct mkFloatProbe)
+                    && not (wordRt.direct mkStrProbe)
+                    && not (valRt.direct mkStrProbe)
+
+            _ ->
+                False
+        )
+        )
+    , check "AREA 4 — THE ALLOCATING-SEAT TABLES ARE EXACT OVER THE WHOLE VALTAG SPACE, AND EVERY SEAT THEY NAME EXISTS IN THE WORD SPLICE (perf word-arm-area4)"
+        -- TWO THINGS THIS PINS THAT NOTHING ELSE CAN.
+        --
+        -- (1) EXACTNESS, NOT JUST EXHAUSTIVENESS.  The rows above walk
+        -- `wordHeapCodes`, and `tagNumber` is NOT in that list — it is an
+        -- IMMEDIATE code.  So the `mknum` row this unit added to
+        -- `wordMkAllocSeat` is INVISIBLE to them: deleting it would leave every
+        -- existing row green while the classifier lost the seat.  This row walks
+        -- the whole VALTAG space instead, so the allocating set is pinned by
+        -- NAME: exactly the boxed integer and the float cell for `mk*`, and
+        -- exactly float/symbol/string for a literal.
+        --
+        -- (2) THE SEAT IS A DEFUN.  A table entry naming a key that no `.mid`
+        -- splice defines would classify a defun as allocating and then LINK-FAIL
+        -- the moment the emitter emitted the call — or, worse for the classifier,
+        -- quietly root a defun for an allocation that cannot happen.  The keys
+        -- are resolved against the WORD splice, which is the text the word arm
+        -- actually emits.
+        (let
+            allValTags =
+                List.range 0 14
+         in
+         (List.filter (\c -> RtLayout.wordMkAllocSeat c /= Nothing) allValTags)
+            == [ RtLayout.tagNumber, RtLayout.tagFloat ]
+            && (List.filter (\c -> RtLayout.wordLitAllocSeat c /= Nothing) allValTags)
+            == [ RtLayout.tagString, RtLayout.tagSymbol, RtLayout.tagFloat ]
+            -- the val arm has NO allocating seat for a `mk*` (a tag word plus
+            -- payload writes), which is why every `mk*` answer above is
+            -- arm-guarded rather than table-only
+            && (case Rt.spliceArm True rawMidText of
+                    Ok wordText ->
+                        List.all
+                            (\seat ->
+                                String.contains ("defun " ++ seat ++ "(") wordText
+                                    || String.contains ("defun " ++ seat ++ "(dummy") wordText
+                            )
+                            [ "Rt.boxInt"
+                            , "Rt.allocFloat"
+                            , "Rt.allocRaw"
+                            , "Rt.allocSym"
+                            , "Rt.allocKind"
+                            , "Rt.allocCons"
+                            , "Rt.allocVector"
+                            , "Rt.allocRecord"
+                            , "Rt.mkStream"
+                            ]
+
+                    Err _ ->
+                        False
+               )
+         )
     , check "THE `mk*` AND LITERAL SEAT TABLES ARE EXHAUSTIVE OVER THE WORD-ARM HEAP CODES — a new allocating writer cannot be added without this row going red (perf word-arm-floats review)"
         -- THE COUPLING IS OTHERWISE HAND-KEPT: `RtLayout.wordMkAllocSeat` and
         -- `Lower`'s `storeWordCell` dispatch agree exactly today, and the row
@@ -2189,7 +2335,7 @@ checks rt rawMidText =
 
     , check "rawAbi set + classification: Rt.cStrEq/Rt.die/Rt.halt/Rt.main + the B0 frame pair + stage 7A's die family (dieErr/hostDieErr — hostDieUnported left BOTH the family and the runtime at 7E, the unit that gave every Task ctor a real arm) are the word-ABI keys and the die/halt/cStrEq/metaGo/parseArgsGo/frame set are frame-free (a die path must not reach a safepoint; the meta-walk compare and the A4a arg loop are non-allocating — their only seat calls are rawcall, which the classifier treats alloc-free — so they stay frame-free; Rt.main stays rawAbi frame-free regardless of its RawCallAgg dispatch, because the rawAbi arm is checked before the allocating set; the frame pair is FRAME-FREE by construction — its only nodes are rawcall/raw-word loads/stores and rawAbi->rawAbi calls to its one non-allocating helper)"
         (Rt.rawAbi
-            == Set.fromList [ "Rt.cStrEq", "Rt.die", "Rt.halt", "Rt.main", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock", "Rt.apply", "Rt.apply-tail", "Rt.copyWords", "Rt.copyWordsGo", "Rt.stage-tail", "Rt.stage-apply", "Rt.applyTailGo", "Rt.dieErr", "Rt.hostDieErr", "Rt.rootGrow", "Rt.rootPush", "Rt.rootPushPtr", "Rt.rootPushValue", "Rt.rootPushValueArray", "Rt.rootPop", "Rt.rootWatermark", "Rt.rootPopTo", "Rt.vecStorePlain", "Rt.vecStoreYoung", "Rt.globalClosure" ]
+            == Set.fromList [ "Rt.cStrEq", "Rt.die", "Rt.halt", "Rt.main", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock", "Rt.apply", "Rt.apply-tail", "Rt.copyWords", "Rt.copyWordsGo", "Rt.stage-tail", "Rt.stage-apply", "Rt.applyTailGo", "Rt.dieErr", "Rt.hostDieErr", "Rt.rootGrow", "Rt.rootPush", "Rt.rootPushPtr", "Rt.rootPushValue", "Rt.rootPushValueArray", "Rt.rootPop", "Rt.rootWatermark", "Rt.rootPopTo", "Rt.vecStorePlain", "Rt.vecStoreYoung", "Rt.globalClosure", "Rt.boxInt" ]
             && not (Set.member "Rt.die" rt.allocating)
             && not (Set.member "Rt.halt" rt.allocating)
             && not (Set.member "Rt.cStrEq" rt.allocating)
@@ -2450,7 +2596,7 @@ checks rt rawMidText =
                     && RtLayout.valLayout.heapKindMask
                     == 0
                     && List.length rows
-                    == 12
+                    == 13
                     && pinned "string" RtLayout.tagString "raw"
                     && pinned "symbol" RtLayout.tagSymbol "raw"
                     && pinned "cons" RtLayout.tagCons "scanned"
@@ -2460,13 +2606,20 @@ checks rt rawMidText =
                     && pinned "vector" RtLayout.tagVector "scanned"
                     && pinned "stream" RtLayout.tagStream "raw"
                     && pinned "float" RtLayout.tagFloat "raw"
+                    -- AREA 4 (perf word-arm-area4): the boxed integer's cell.
+                    -- `raw` IS THE DECISION, not an inheritance: its body is one
+                    -- raw i64, so a scan would walk an integer as a pointer.
+                    -- The row is also what makes `heapKindScanned` and the
+                    -- runtime's own KIND-CONTRACT text unable to drift on it.
+                    && pinned "bigint" RtLayout.tagBigInt "raw"
+                    && not (RtLayout.heapKindScanned RtLayout.tagBigInt)
                     && pinned "record" RtLayout.tagRecord "scanned"
                     && List.isEmpty (kindContractRows valText)
                     && List.isEmpty (List.filter (String.contains "KIND-CONTRACT") (String.split "\n" valText))
                     && List.isEmpty (List.filter (String.contains "QBE_WORDVAL-ONLY") (String.split "\n" valText))
                     && List.isEmpty (List.filter (String.contains "QBE_VAL-ONLY") (String.split "\n" valText))
                     && List.length (kindContractRows wordText)
-                    == 12
+                    == 13
 
             _ ->
                 False
@@ -3071,13 +3224,28 @@ checks rt rawMidText =
             Err _ ->
                 False
         )
-    , check "VR3b3 FIX F6 - THE `mk*` PATH IS RANGE-CHECKED TOO, NOT JUST `PrimApp`. A word-arm fixnum is an i61, so `mknum` of a value whose top three bits survive the tag shift would be SILENTLY TRUNCATED - and `mknum` is how every runtime site boxes a word. A COMPILE-TIME constant is refused by name (AREA 4, the boxing path that does not exist yet), and a DYNAMIC word gets a round-trip check whose failure REFUSES loudly instead of truncating. Both halves are pinned: `mknum(2^60)` must NOT emit, and the dynamic write must emit `shl`/`sar`/`ceql`/`jnz` plus the refusal"
+    , check "AREA 4 SUPERSEDES VR3b3 FIX F6 - THE `mk*` PATH IS RANGE-CHECKED, AND THE FAILURE BRANCH NOW BOXES INSTEAD OF REFUSING (perf word-arm-area4). A word-arm fixnum is an i61, so `mknum` of a value whose top three bits survive the tag shift would be SILENTLY TRUNCATED - and `mknum` is how every runtime site boxes a word. The check is a ROUND TRIP (`w << 3 >> 3 == w`), and BOTH halves of the old row's claim are now the stronger statement: a COMPILE-TIME constant outside i61 emits a `Rt.boxInt` call (it used to be a named EMIT refusal, because the boxing path did not exist), and a DYNAMIC word keeps the round-trip check whose failure branch is the SAME boxing call instead of `Rt.die`. The `Rt.die` refusal text is gone from the emitted module entirely, which is the asymmetry this row pins: the pre-fix .ssa carried `mknum overflow ... Refusing instead of truncating` and the post-fix .ssa carries `call $q_Rt_x2eboxInt` and NO such message."
         ((case QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities [ bigMkProbe ]) [ bigMkProbe ] "Bm.f" of
-            Err msg ->
-                String.contains "AREA 4 (ARITHMETIC" msg
-                    && String.contains "mknum of a compile-time value at or beyond the i61 bound" msg
+            -- THE COMPILE-TIME CONSTANT: it must EMIT now, and it must emit the
+            -- SEAT.  `2^60` is host-exact, so its i64 is rebuilt from limbs
+            -- (256 * 2^52) rather than printed as an `Il.Con` — the reason the
+            -- limbs are asserted rather than the number.
+            Ok mod ->
+                let
+                    txt =
+                        Print.print mod
+                in
+                -- THE PROPERTY, NOT THE TEMP IDS: the exact i64 is rebuilt
+                -- from base-2^26 limbs (2^60 is `256 * 2^52`, so the high limb
+                -- carries it and the low two are zero), and the RESULT is the
+                -- boxing seat.  Temp numbers move whenever the writer gains a
+                -- temp; the limb product and the seat are what the claim is.
+                String.contains "=l mul 256, 4503599627370496" txt
+                    && String.contains "call $q_Rt_x2eboxInt(" txt
+                    && not (String.contains "mknum of a compile-time value" txt)
+                    && not (String.contains "mknum overflow" txt)
 
-            Ok _ ->
+            Err _ ->
                 False
          )
             && (case QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities [ payloadProbe ]) [ payloadProbe ] "Pl.f" of
@@ -3086,11 +3254,23 @@ checks rt rawMidText =
                             txt =
                                 Print.print mod
                         in
-                        -- THE TEMP IDS MOVED when the payload reader gained its
-                        -- immediate arms (perf word-arm-area3rt); the CHECK is
-                        -- the same three instructions on one value.
-                        String.contains "\t%t12 =l shl %t8, 3\n\t%t13 =l sar %t12, 3\n\t%t14 =w ceql %t13, %t8\n" txt
-                            && String.contains "mknum overflow" txt
+                        -- THE DYNAMIC WORD: the round-trip check is unchanged
+                        -- (perf word-arm-area3rt moved the temp ids when the
+                        -- payload reader gained its immediate arms), and its
+                        -- FAILURE BRANCH is the boxing seat, on a join that
+                        -- carries the fixnum on the other side.
+                        -- the round trip, the BRANCH to the box, the seat, and
+                        -- the join that carries the fixnum on the other side —
+                        -- asserted by LABEL (mine) and by opcode, not by temp id
+                        -- (perf word-arm-area3rt moved them once already).
+                        String.contains "=l shl " txt
+                            && String.contains "=l sar " txt
+                            && String.contains "=w ceql " txt
+                            && String.contains "@fixbox_" txt
+                            && String.contains "call $q_Rt_x2eboxInt(" txt
+                            && String.contains "@fixok_" txt
+                            && String.contains "@fixjoin_" txt
+                            && not (String.contains "mknum overflow" txt)
 
                     Err _ ->
                         False
@@ -3210,8 +3390,15 @@ checks rt rawMidText =
             && RtLayout.wordLayout.tagFalse
             == RtLayout.wordLayout.tagTrue
             + 1
+            -- AREA 4 (perf word-arm-area4): the boxed integer joined the heap
+            -- codes.  It is a HEAP BLOCK whose body is RAW, which is exactly the
+            -- distinction `wordHeapCodes` states ("the object is a heap block at
+            -- all"), and it is NOT in `heapKindScanned` — the two lists differ on
+            -- it for the same reason they differ on a string.
             && List.length RtLayout.wordHeapCodes
-            == 9
+            == 10
+            && List.member RtLayout.tagBigInt RtLayout.wordHeapCodes
+            && not (RtLayout.heapKindScanned RtLayout.tagBigInt)
             && List.member RtLayout.tagString RtLayout.wordHeapCodes
             && List.member RtLayout.tagRecord RtLayout.wordHeapCodes
             && not (List.member RtLayout.tagNumber RtLayout.wordHeapCodes)
@@ -16171,6 +16358,55 @@ intLitProbe =
         Lam
             { params = []
             , body = Lit (LNumber 1)
+            }
+    }
+
+
+{-| AREA 4 (perf word-arm-area4) — THE BOXED-INTEGER PROBES.
+
+`mkNumProbe` is the `mk*` node for `tagNumber`: the third place the
+`mk*`-as-safepoint rule has had to hold.  Its word writer now BOXES when the
+word does not fit the i61 fixnum, so a defun whose only allocation is a `mknum`
+must be ROOTED on the word arm and stays frame-free on the val arm (a tag word
+plus a payload word, nothing allocated).
+
+THE TWO BIG-LITERAL PROBES ARE THE PAIR THAT MAKES THE ROW ABLE TO FAIL, and
+they are the first case in this tree where two literal FORMS share one CODE and
+differ in whether they allocate.  `bigLitProbe` is INT64_MAX — outside i61, so
+the word writer boxes it.  `fitsBigLitProbe` is 2^60-1 — above 2^53 (so it is a
+`LNumberBig`, not a `LNumber`) but INSIDE i61, so it is shifted into the tag
+bits and allocates nothing.  A row carrying only the first would pass if the
+walker answered True for every big literal; the second is what forbids that.
+-}
+mkNumProbe : Defun
+mkNumProbe =
+    { key = "Mn.f"
+    , value =
+        Lam
+            { params = []
+            , body = Unsafe (RawMkValue { tag = RtLayout.tagNumber, words = [] })
+            }
+    }
+
+
+bigLitProbe : Defun
+bigLitProbe =
+    { key = "Bl.f"
+    , value =
+        Lam
+            { params = []
+            , body = Lit (LNumberBig "9223372036854775807")
+            }
+    }
+
+
+fitsBigLitProbe : Defun
+fitsBigLitProbe =
+    { key = "Bf.f"
+    , value =
+        Lam
+            { params = []
+            , body = Lit (LNumberBig "1152921504606846975")
             }
     }
 

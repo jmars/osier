@@ -5126,69 +5126,6 @@ wordFloatPayload valueWord s0 =
     )
 
 
-{-| DOES A BIG LITERAL FIT THE WORD ARM'S i61 FIXNUM?  DECIDED ON THE DIGITS.
-
-The bound is `Mid/RtLayout.wordFixnumLimit` (2^60) and it is EXCLUSIVE IN
-MAGNITUDE: a fixnum is `-limit <= n < limit`.  It cannot be decided with host
-arithmetic — this compiler's `Int` is a double, so 2^60-1 rounds UP to 2^60 and
-the comparison would pass the first out-of-range value (the VR3b2 defect,
-MEASURED).  So the decision is LEXICAL, on the same decimal digit string the
-parser validated: strip leading zeros, compare lengths, then compare
-lexicographically.  `String.fromInt wordFixnumLimit` is exact (2^60 IS
-representable as a double), which is what makes the bound spellable as a digit
-string at all.
-
-`limit` itself fits when the literal is NEGATIVE (`-2^60 << 3` is INT64_MIN,
-which sar-round-trips) and does not when it is positive (`2^60 << 3` overflows).
-That asymmetry is the bound's whole content and it is stated once here.
--}
-bigLiteralFitsFixnum : String -> Bool
-bigLiteralFitsFixnum digits =
-    let
-        ( negative, magnitude ) =
-            if String.startsWith "-" digits then
-                ( True, String.dropLeft 1 digits )
-
-            else
-                ( False, digits )
-
-        -- the decimal of `wordFixnumLimit`, exact on this host (a power of two)
-        limitDigits =
-            "1152921504606846976"
-
-        leadingZeros str =
-            if String.startsWith "0" str then
-                1 + leadingZeros (String.dropLeft 1 str)
-
-            else
-                0
-
-        normalised =
-            String.dropLeft (leadingZeros magnitude) magnitude
-
-        bound =
-            if String.length normalised /= String.length limitDigits then
-                String.length normalised < String.length limitDigits
-
-            else
-                normalised < limitDigits
-
-        equalBound =
-            normalised == limitDigits
-    in
-    if normalised == "" then
-        True
-
-    else if bound then
-        True
-
-    else if equalBound then
-        negative
-
-    else
-        False
-
-
 {-| AREA 4 (perf word-arm-area4): THE BOXING SEAT — store `w` into `dest` as a
 BOXED integer, the i64 living in a code-13 heap cell instead of the fixnum's
 tag bits.
@@ -5273,13 +5210,17 @@ emitExactWord n s0 =
             else
                 n
 
-        -- `//` is truncating integer division, and both operands are integral
-        -- doubles, so every quotient here is EXACT (no rounding to lose).
+        -- NOT `//`: ELM'S `//` IS 32-BIT TRUNCATING (`(a / b) | 0`), so
+        -- `2^60 // 2^26` answers 0 rather than 2^34 — MEASURED here, the first
+        -- cut of this function emitted `mul 0, 4503599627370496` for 2^60 and
+        -- boxed ZERO.  `floor (a / b)` is `Math.floor`, exact for integral
+        -- doubles at any magnitude, which is the whole reason a limb split is
+        -- done with doubles rather than with integer division.
         q1 =
-            magnitude // 67108864
+            floor (toFloat magnitude / 67108864)
 
         limb2 =
-            q1 // 67108864
+            floor (toFloat q1 / 67108864)
 
         limb1 =
             q1 - limb2 * 67108864
@@ -8134,7 +8075,7 @@ lowerLitWord lit dest s =
                             else
                                 Il.Tmp t4
                     in
-                    if bigLiteralFitsFixnum digits then
+                    if RtLayout.bigLiteralFitsFixnum digits then
                         let
                             ( sh, s8 ) =
                                 freshTmp s7
