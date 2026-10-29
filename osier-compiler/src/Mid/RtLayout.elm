@@ -249,8 +249,14 @@ tagBigInt =
 --   bit 0        MARK      set by the marker, cleared by the sweep
 --   bit 1        SCAN KIND 1 = the body is `count` Values, 0 = `count` raw words
 --   bits 2..23   CLASS     the size class (`kind*2 + cls*4`, the ladder's own
---                          packing — MEASURED: numClass < 2^20 at any mappable
---                          ceiling, so bits 22..23 are already spare)
+--                          packing — widened from 2..21 to the DOCUMENTED
+--                          22 bits when the 2^20 ceiling fired at the
+--                          selfhost's default heap: at 32 GiB the +4 GiB
+--                          ladder arm wants ~1.18M classes, which needs 21
+--                          bits, so bits 22..23 are NOT spare past ~64 GiB
+--                          ceilings.  22 bits = 4,194,304 classes x 32 KiB
+--                          = a hard ceiling of 128 GiB, which `gcInit`
+--                          refuses to exceed BY NAME)
 --   bits 24..27  KIND CODE this contract (a 4-bit code; see below)
 --   bit 61       RS        the remembered set
 --   bit 62       FORWARDED the young space's evacuation mark
@@ -1264,10 +1270,16 @@ valLayout =
 --      36/28/18/0 and 46/36/26/3, word 30/18/8/0 and 44/32/20/1).
 --      `wordArmDefunRefusals` IS EMPTY — the refusal LIST is empty, which is a
 --      statement about the classifier's by-name gate and NOT about correctness.
---      The correctness statement is the paragraph above: the churn row is red at
---      h1.  (This distinction is the review's blocker 3: the list went empty and
---      the worklist said COMPLETE, while the implementer's own churn fixture
---      recorded RED.  A worklist that over-claims is worse than none.)
+--      The correctness statement is the paragraph above (the record churn
+--      ladders, green WITH real collections on both arms).  PROVENANCE OF THIS
+--      PARAGRAPH: it was written when the churn row WAS red at h1 — the review's
+--      blocker 3 caught the empty list and the COMPLETE claim sitting above a
+--      red fixture, and the distinction was correct THEN.  It was reconciled in
+--      the same arc: the H1 close-out fixed the classification gap, the churn
+--      row went green, and the ladders now carry real collections on both arms.
+--      If a future change reddens the churn row again, this paragraph must be
+--      re-marked at the same time — an empty refusal list and a red fixture must
+--      never coexist unnoticed, which is exactly what happened here once.
 --      NOT PORTED, refused by name: `StreamRef` — AND IT IS THE ONLY ONE.  A
 --      float literal, `f/` and `let`-destructuring all left this list in perf
 --      word-arm-floats and perf word-arm-letdestr, each as an ADMISSION whose

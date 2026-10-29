@@ -299,8 +299,11 @@ extern strfromd(buf : ptr, n : i64, fmt : ptr, x : f64) -> i32;
 //   One young space carved AFTER capEnd in the same mmap; all allocation bumps
 //   in it; on fill a SCAVENGE copies every live young object into OLD space
 //   (= promotion on first survival) and resets the bump pointer.  The two
-//   load-bearing header bits, both ABOVE every legal class (numClass is < 2^20
-//   at any mappable ceiling) and both CLEARED by a fresh header:
+//   load-bearing header bits, both ABOVE every legal class (the class field is
+//   bits 2..23, 22 bits — widened when the 2^20 ceiling fired at the
+//   selfhost's default heap; numClass reaches ~1.18M at 32 GiB, needing 21
+//   bits, so the ceiling is now a HARD named bound at 128 GiB, see gcInit)
+//   and both CLEARED by a fresh header:
 //     bit 61  RS        the block is in the remembered set (set by the
 //                       rt_vec_store_young barrier, cleared by the scavenge's
 //                       remembered walk, by the sweep's free arm, and by every
