@@ -140,6 +140,11 @@ row() {
     h2) envs=(QBE_HEAP_MB=2) ;;
     h4) envs=(QBE_HEAP_MB=4) ;;
     h8) envs=(QBE_HEAP_MB=8) ;;
+    # THE MARK-WALK RUNG (closchurn): with the young generation off there is no
+    # scavenge, so the defect's SECOND fingerprint is what fires — the full
+    # collector's mark walk reading the same raw count.  A row that only ever
+    # ran the scavenger would have missed half the class.
+    h2-young0) envs=(QBE_HEAP_MB=2 QBE_MIDGC_YOUNG=0) ;;
   esac
   # QBE_MIDGC_STATS=1 is how a rung proves it COLLECTED: the runtime prints one
   # `midgc: scavenge s=N ...` line per scavenge to stderr (fd 2), so the count is
@@ -301,6 +306,36 @@ row host     h1      300  1
 row host     h2      300  1
 row host     h4      300  1
 row host     default 300  1
+# ---- THE SCANNED-BODY COUNTS (the poisoned-body fix, 2026-10-29): a word-arm
+#      closure cell is ONE code-6 SCANNED block whose body words 1 and 3 are
+#      counts, and the drain walks EVERY body word as a Value — so a RAW count
+#      ≡ 7 (mod 8) IS the reserved poison tag, and the collect reports a
+#      forwarded body for what is the arithmetic `rem - nargs == 7` / `cnt == 7`.
+#      A count ≡ 1 (mod 8) was silently read as a pointer to a low address.
+#      THIS ROW IS THE CLASS'S ONLY INSTRUMENT, and it is a LADDER because the
+#      class is invisible without a collection that has a ≡ 7-count closure
+#      LIVE: `main = \x -> x` never counts 7 and never collects, which is why
+#      the whole tree was green while the whole-compiler emit died.
+#      MEASURED BEFORE the fix (this tree, the diagnosis binaries): word arm
+#      rc 1 `scavenge read a POISONED (forwarded young) body` at h1/h2/h4/h8,
+#      rc 1 `unknown value tag in mark walk` at h2 with YOUNG=0, val arm
+#      `6000/0|6000/0` rc 0 at h1/h2/h4, and the WORD arm at DEFAULT knobs also
+#      `6000/0|6000/0` rc 0 — so the default rung is a REGRESSION row here (it
+#      collects ZERO times on both arms; MEASURED with QBE_MIDGC_STATS=1) and
+#      must not be credited as collection coverage.
+#      MEASURED AFTER (same metric, collections val/word): h1 26/22, h2 20/16,
+#      h4 12/8, h8 4/4, h2-young0 5/5 (full collects — the mark-walk arm), and
+#      0/0 at default.  All four heaps and the young-off rung are COLLECTING.
+#      The fixture compares CONTENT after applying each closure, so a cell whose
+#      counts read back at the wrong scale answers a wrong number instead of
+#      matching itself — which is what makes this a behaviour row and not a
+#      "did it crash" row.
+row closchurn h1        120  1
+row closchurn h2        120  1
+row closchurn h4        120  1
+row closchurn h8        120  1
+row closchurn h2-young0 120  1
+row closchurn default   120  0   # regression row: MEASURED 0 collections on BOTH arms
 
 if [ "$fails" != 0 ]; then
   echo "word-arm-gcchurn: $fails failure(s) — a closure is being read after a collection it did not survive"
