@@ -216,6 +216,26 @@ tagRecord =
     14
 
 
+-- ============ AREA 4: THE BOXED INTEGER'S KIND CODE AND ITS SCAN DECISION ============
+-- A boxed integer is the i61 overflow path's heap cell: a result whose i64 value
+-- does not fit the word arm's i61 fixnum is stored here instead of being refused.
+-- Its KIND CODE is 13, the ValTag enum's DELIBERATE GAP (the first Phase-3/E pass
+-- had record = 13, the refinement moved record to 14 and left 13 unwritten).
+-- Choosing the gap rather than extending past 14 keeps the code inside the
+-- numbering every reader already switches on, and nothing switches on 13 today.
+--
+-- ITS SCAN BIT IS FALSE, AND THAT IS A DECISION RATHER THAN AN INHERITANCE.  The
+-- body of a boxed integer is ONE raw i64 word — the number itself, not a Value
+-- and not a pointer — so it must NOT appear in `heapKindScanned`'s scanned set.
+-- The alternative (letting the collector scan it) would walk an integer as a
+-- pointer: the silent-corruption class this arm exists to prevent.  `Rt.kindHdr`
+-- derives header bit 1 from `heapKindScanned`, so the header says raw by
+-- construction and there is no second statement to drift.
+tagBigInt : Int
+tagBigInt =
+    13
+
+
 
 -- ==================== THE GC-HEADER KIND CONTRACT (VR3c, AREA 1) ====================
 -- WHAT THIS SETTLES, AND WHY IT HAD TO BE SETTLED HERE.  Under the word arm
