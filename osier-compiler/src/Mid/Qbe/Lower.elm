@@ -13729,7 +13729,7 @@ finishModule s keys =
                 -- stage 6 P1d Step B: the two-range apply bridge.  B4 closed
                 -- the hatch (the Mid route is the only route), so it is
                 -- unconditional.
-                ++ [ rtCallTwoRange s.layout ]
+                ++ [ rtCallTwoRange s ]
 
         -- Rt.* defuns (osier-consspike) are INTERNAL: no global Desc (only a
         -- GRef'd defun needs one, and surface code cannot GRef an Rt key), no
@@ -14059,9 +14059,26 @@ rtCallFuncs layout =
 -- Rt.callArity's table and Rt.bounceGo's 17-arm chain, whose own note at
 -- runtime.mid:4332 documents the same gap).  Kept as a stated parity gap, not
 -- a live hazard; if maxArity ever grows, this chain follows it automatically.
-rtCallTwoRange : RtLayout.ValLayout -> Func
-rtCallTwoRange layout =
+rtCallTwoRange : S -> Func
+rtCallTwoRange s =
     let
+        layout =
+            s.layout
+
+        -- U3a/AREA 6 — THE CLASS, in ONE binding.  This function's own return
+        -- class and the class it `tcall`s with are the SAME value, so the hop
+        -- cannot be a class mismatch: `closureRetClass` is the closure ABI's
+        -- one statement of it (`:val` on both arms), and `lowerFunBody` gives
+        -- every RtGeneric body — which is what `%code`, the DYNAMIC callee
+        -- here, points at — that same class.  A mismatch is therefore
+        -- unrepresentable AT THIS SITE, and the check that can still fail is
+        -- the backend's abi1 C4, which REFUSES a tcall whose class disagrees
+        -- with the enclosing function's BY NAME ("tcall: the callee returns an
+        -- aggregate, the enclosing function does not") — never a silent call.
+        -- Both directions are measured in tools/qbe/tcall-class-probe.sh.
+        tailClass =
+            closureRetClass s
+
         -- (i < napp) ? caps + i*40 : args + (i-napp)*40, branchless:
         --   p = (args - napp*40) + (i<napp)*(caps + napp*40 - args) + i*40
         paramPtr : Int -> List Inst
@@ -14072,6 +14089,29 @@ rtCallTwoRange layout =
             , Bin (Just ("pa" ++ String.fromInt i)) L Add (Il.Tmp "base") (Il.Tmp ("sel" ++ String.fromInt i))
             , Bin (Just ("p" ++ String.fromInt i)) L Add (Il.Tmp ("pa" ++ String.fromInt i)) (Il.Con (i * layout.valSizeBytes))
             ]
+
+        -- THE WORD ARM'S ARGUMENT LOAD — and WHY IT IS NOT IN THE ARITY BLOCK.
+        -- A `tcall` must be the LAST INSTRUCTION of its block (abi1 checks it),
+        -- and this backend's `gcm` BREAKS that invariant on any block that both
+        -- loads and tcalls: `sink()` re-materialises a load's address chain in
+        -- the load's block via `addins`, which APPENDS — so the copies land
+        -- AFTER the tcall.  The copies it recurses into are dead (`sinkref`
+        -- emits the instruction BEFORE rewriting its args), so `schedblk` has
+        -- no use edge to order them by and leaves them where they landed.
+        -- MEASURED: the arity blocks' address chains are shared prefixes, so
+        -- `gvn` CSEs them into a dominator; the load then has no local chain
+        -- and `sink()` fires every time.  (The val arm never sees this: it
+        -- passes arg POINTERS, so its tcall blocks hold no load at all.)
+        -- Moving the load one block EARLIER — into the dispatch block that
+        -- proves the argument exists — leaves every tcall block with only
+        -- env/args/tcall, and the dead copies land in a block with no tcall.
+        -- SAFE: `@c{k}` is reached only when `arity >= k` (every `@c{j}` before
+        -- it tested `arity == j` and fell through), so argument k-1 is always
+        -- present.  Cost is unchanged: each argument is loaded exactly once.
+        argLoad : Int -> List Inst
+        argLoad i =
+            paramPtr i
+                ++ [ Load (Just ("pv" ++ String.fromInt i)) L LoadL (Il.Tmp ("p" ++ String.fromInt i)) ]
 
         arityBlock : Int -> Block
         arityBlock n =
@@ -14104,52 +14144,68 @@ rtCallTwoRange layout =
                 -- caller — a CONSTANT +1 per such hop, not growth (this func
                 -- was itself tcall'd into, so its frame is the loop's slot).
                 --
-                -- NOT under the word arm — and VR3d RE-MEASURED the reason
-                -- instead of re-reading it, because the flip made this the
-                -- DEFAULT arm's shape.  The old reason ("`:val` is 8 bytes, an
-                -- aggregate the amd64 ABI passes in a register, and the
-                -- tcall's class/`aggsize` rules would have to be re-measured")
-                -- is HALF right: the rules are not the problem, the EMITTED
-                -- SHAPE is.  Dropping the `not (wordArmLayout layout)` here
+                -- ON BOTH ARMS — the word arm's exclusion is GONE, and it went
+                -- by MEASUREMENT, not by re-argument (perf word-arm-area6).
+                -- It stood on this: "dropping `not (wordArmLayout layout)`
                 -- makes the word arm emit `tcall :val %code(env %e, l %pv0)`
                 -- in a block that LOADED `%pv0` first, and the vendored QBE
-                -- REJECTS exactly that: "tcall must be the last instruction of
-                -- its block" (its isel checks the input block's last
-                -- instruction and the load-argument shape does not survive it).
-                -- A one-line mutation of the val arm's own `.ssa` (insert
-                -- `%pv0 =l loadl %p0` before its tcall) reproduces the refusal;
-                -- an `add` in the same position does not.  So this is AREA 6
-                -- work (a closure-call ABI whose args are words QBE will tcall
-                -- with), not a switch.
+                -- REJECTS exactly that — 'tcall must be the last instruction
+                -- of its block'".  MEASURED at the tree before this commit,
+                -- four shapes: that EXACT shape ASSEMBLES (rc 0) — a
+                -- `tcall :val` with `%pv0b =l loadl %pv0` immediately before
+                -- it AND a bare `ret` after it, inside a caller returning
+                -- `:val`.  The reproduction that had seemed to red it was
+                -- malformed in two independent ways: its `export function`
+                -- omitted the return type ("newline expected, got ??"), and
+                -- its mutation put the load AFTER the tcall, which trips the
+                -- bare-`ret` rule rather than anything about the load.  (The
+                -- load does move on this arm — one block earlier, see
+                -- `argLoad` — but for a different reason: `gcm`'s sink pass
+                -- appends dead copies to a block that both loads and tcalls,
+                -- which is a REAL refusal and is what the first cut hit.)
+                -- What QBE DOES refuse is a CLASS MISMATCH — a caller returning `l`
+                -- while the callee returns `:val` — and that is unreachable
+                -- from here: `tailClass` is ONE binding, used by the tcall,
+                -- by the ordinary call's result and by this function's own
+                -- `ret`, and the closure bodies `%code` names read the same
+                -- `closureRetClass`.  Both directions (the legal emit
+                -- assembles; a mutated class is refused BY NAME) are measured
+                -- in tools/qbe/tcall-class-probe.sh.
                 --
-                -- WHAT THAT COSTS, MEASURED on the flipped tree (clostail-big's
-                -- own instrument: an OWNED 8 MiB stack via prlimit +
-                -- QBE_NO_RLIMIT=1): the generic-apply tail chain on the word
-                -- arm is NOT constant-stack — n=8000 rc 0, n=9000 rc 139
-                -- (SIGSEGV) — i.e. ~1 KB of stack per hop, because every hop
-                -- of a RE-ENTERED chain stacks one `rt_call2r` frame.  The
-                -- "constant +1 per such hop" this comment used to claim is
-                -- true only for a chain that does not re-enter; the closure
-                -- tail chain does.  The val arm is FLAT at n=1e6 (16276 kB
-                -- peak).  This is the flip's one open defect: see the
-                -- qbe-check `clostail-big` row.
+                -- WHAT THE EXCLUSION COST, MEASURED on the flipped tree with
+                -- clostail-big's own instrument (an OWNED 8 MiB stack via
+                -- prlimit + QBE_NO_RLIMIT=1): the generic-apply tail chain was
+                -- NOT constant-stack — n=8000 rc 0, n=9000 rc 139 (SIGSEGV),
+                -- ~1 KB per hop, because every hop of a RE-ENTERED chain
+                -- stacked one `rt_call2r` frame.  The "constant +1 per such
+                -- hop" above is true only for a chain that does not re-enter;
+                -- the closure tail chain does.  With the tcall it is FLAT at
+                -- n=1e6 under that same owned stack (the qbe-check
+                -- `clostail-big` row, green since this commit).
                 canTail =
-                    not (wordArmLayout layout) && n <= maxTailCallArgs
+                    n <= maxTailCallArgs
             in
             { label = "arity" ++ String.fromInt n
             , body =
-                List.concatMap paramPtr (List.range 0 (n - 1))
-                    ++ (if wordArmLayout layout then
-                            List.map (\i -> Load (Just ("pv" ++ String.fromInt i)) L LoadL (Il.Tmp ("p" ++ String.fromInt i))) (List.range 0 (n - 1))
+                (if wordArmLayout layout then
+                    -- the last arity has no `@c{maxArity}` to have loaded its
+                    -- final argument, so it loads that one itself — safe here
+                    -- because arity > maxTailCallArgs means an ordinary CALL,
+                    -- which has no last-instruction rule.
+                    if n == layout.maxArity then
+                        argLoad (n - 1)
 
-                        else
-                            []
-                       )
+                    else
+                        []
+
+                 else
+                    List.concatMap paramPtr (List.range 0 (n - 1))
+                )
                     ++ [ if canTail then
-                            TailCall (Agg "val") (Il.Tmp "code") callArgs
+                            TailCall tailClass (Il.Tmp "code") callArgs
 
                          else
-                            Call (Just "r") (Agg "val") (Il.Tmp "code") callArgs
+                            Call (Just "r") tailClass (Il.Tmp "code") callArgs
                        ]
             , jump =
                 if canTail then
@@ -14166,7 +14222,13 @@ rtCallTwoRange layout =
         dispatchBlock k =
             { label = "c" ++ String.fromInt k
             , body =
-                [ Cmp (Just ("d" ++ String.fromInt k)) L Ceq (Il.Tmp "arity") (Il.Con k) ]
+                (if wordArmLayout layout then
+                    argLoad (k - 1)
+
+                 else
+                    []
+                )
+                    ++ [ Cmp (Just ("d" ++ String.fromInt k)) L Ceq (Il.Tmp "arity") (Il.Con k) ]
             , jump =
                 Jnz (Il.Tmp ("d" ++ String.fromInt k))
                     ("arity" ++ String.fromInt k)
@@ -14194,8 +14256,10 @@ rtCallTwoRange layout =
     in
     { name = "rt_call2r"
     , export_ = True
-    -- U3a: `:val` out — the callee returns the finished Value.
-    , ret = Agg "val"
+    -- U3a: `:val` out — the callee returns the finished Value.  AREA 6: the
+    -- SAME binding the arity blocks `tcall` with (`tailClass`), so the tcall's
+    -- class and this function's own cannot disagree.
+    , ret = tailClass
     , envParam = False
     , params =
         [ ( "code", Base L )
