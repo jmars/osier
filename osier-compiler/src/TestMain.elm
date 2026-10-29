@@ -1849,6 +1849,47 @@ checks rt rawMidText =
     -- calls.  A :val-shaped arg or an under-applied call here is a SILENT
     -- MISCOMPILE (the callee reads a garbage register), so the emitted
     -- shapes are pinned, not just "it links".
+    , check "THE WORD ARM'S CLASS FIELD IS BITS 2..23 IN ALL FOUR READERS, AND THE KIND CONTRACT DID NOT MOVE (perf word-arm-records THE CEILING). The field was DOCUMENTED as bits 2..23 and MASKED as bits 2..21 — bits 22 and 23 sat unused while the ceiling guard fired at 2^20 classes, so the whole-compiler emit could not initialise its heap at the selfhost's QBE_HEAP_MB=32768 default (MEASURED: 8,389,120 classes needed). ONE FIELD, FOUR READERS (the sweep's advance, the free list's index, the verifier's compare and gcScavPtr's), so this row pins ALL FOUR at the same mask and pins that the KIND CODE stayed where VR3c put it — a mask widened in three places and not the fourth is exactly the silent truncation the guard exists for, and a kind shift moved without its contract rows is the mixed-representation read the whole arm exists to prevent"
+        (case ( Rt.spliceArm False rawMidText, Rt.spliceArm True rawMidText ) of
+            ( Ok valText, Ok wordText ) ->
+                let
+                    classSites =
+                        List.length (String.indexes "& 4194303" wordText)
+
+                    staleSites =
+                        List.length (String.indexes "& 1048575" wordText)
+                in
+                classSites
+                    == 4
+                    && staleSites
+                    == 0
+                    -- the ceiling clamp, its budget refusal and the widened
+                    -- canary, all in the WORD splice ...
+                    && String.contains "numClasses >= 4194304" wordText
+                    && String.contains "heapBytes > 137438953472" wordText
+                    && String.contains "(capWanted > 137438953472) ? mknum(137438953472)" wordText
+                    -- ... AND NONE OF THEM IN THE VAL SPLICE: the clamp is an
+                    -- arm-spliced decision, and the legacy val arm's emit must
+                    -- not move for it (MEASURED byte-identical).
+                    && not (String.contains "137438953472" valText)
+                    -- (NOT a bare "4194304" check: that literal ALSO names the
+                    -- nursery's floor, so a negative on it would be a false red
+                    -- — the clamp constant 137438953472 is unique to this fix.)
+                    -- THE KIND CONTRACT IS UNMOVED: shift 24, mask 15, and
+                    -- kindHdr's 2^24 constant.  A class widening must not have
+                    -- touched them — a kind shift moved without its contract
+                    -- rows is the mixed-representation read this arm exists to
+                    -- prevent.
+                    && RtLayout.heapKindShift
+                    == 24
+                    && RtLayout.heapKindMask
+                    == 15
+                    && String.contains "k * 16777216" wordText
+                    && String.contains "(flags >> 24) & 15" wordText
+
+            _ ->
+                False
+        )
     , check "THE ALLOCATION SEATS ADMIT THEIR CALLERS, AND STAY FRAME-FREE THEMSELVES (perf word-arm-records H1 FIX). This is the row the h1 churn defect needed and did not have: the CLASSIFICATION was the untested surface, not the mask. A defun that CALLS an allocation seat can collect, so it must be in `allocating` and get a REGISTERED frame — the seats are word-only defuns whose bodies contain no alloc PRIM, so before this fix the fixed point could not reach them and every seat caller lowered to an unrooted `alloc8` frame whose slots the scavenger cannot see (MEASURED: `Rt.recAppend`'s `rec` went stale on the first promotion inside `Rt.allocKind`, SIGSEGV at QBE_HEAP_MB=1, green at default knobs because no scavenge runs). The seats THEMSELVES must NOT be members: each holds no Value across its own `gcAlloc` (the call is its last statement) and a rooted frame inside the gc family would be a hazard, not a cost. BOTH DIRECTIONS, so neither a missing seat edge nor an over-eager seed can pass"
         -- THE FRAME CLASS IS ASSERTED ON THE EMITTED WORD TEXT, and the SEAT
         -- HALF IS ASSERTED OVER THE WORD LOAD (perf word-arm-records H1 review
@@ -2961,9 +3002,9 @@ checks rt rawMidText =
                     == 2
                     && List.isEmpty (List.filter (String.contains "wstore(e, 4, wload(val, 4));") (String.split "\n" wordText))
                     -- THE CLASS-READER CENSUS: exactly FOUR, each masked to bits
-                    -- 2..21 — a fifth reader (or one left at the val mask) is
-                    -- RED, because the kind code lives in bits 24..27.
-                    && List.length (List.filter (String.contains "(flags >> 2) & 1048575") (String.split "\n" wordText))
+                    -- 2..23 — a fifth reader (or one left at the old 2..21
+                    -- mask) is RED, because the kind code lives in bits 24..27.
+                    && List.length (List.filter (String.contains "(flags >> 2) & 4194303") (String.split "\n" wordText))
                     == 4
                     && String.contains "word tab = rawcall malloc(12288);" valText
                     && String.contains "word tab = rawcall malloc(4096);" wordText
@@ -2978,11 +3019,11 @@ checks rt rawMidText =
                     && String.contains "word tag = v & 7;" wordText
                     && String.contains "mknum(v - 1)" wordText
                     -- the header reads: the code at bits 24..27, the class at
-                    -- bits 2..21 (mask 2^20-1), never the full 0..60 mask
+                    -- bits 2..23 (mask 2^22-1), never the full 0..60 mask
                     && String.contains "word kind = (flags >> 24) & 15;" wordText
                     && not (String.contains "(flags >> 24)" valText)
-                    && String.contains "(flags >> 2) & 1048575;" wordText
-                    && String.contains "((flags >> 2) & 1048575) != clsW" wordText
+                    && String.contains "(flags >> 2) & 4194303;" wordText
+                    && String.contains "((flags >> 2) & 4194303) != clsW" wordText
                     && not (String.contains "1048575" valText)
                     -- the row sizes ARE the layout's: name word + one value
                     && RtLayout.wordBytes
@@ -3035,19 +3076,27 @@ checks rt rawMidText =
     , check "VR3c FIX 2 + NICETY (ii) — THE TWO GUARDS THE REVIEW ASKED FOR. (a) CODE 0: the word-arm general allocation seat REFUSES it by name (code 0 means NO CODE, i.e. a val-arm header), which is what makes 'no word-arm allocator writes 0' an ENFORCED property rather than prose; the four seats pass 10 / 4 / 1 / caller-supplied. (b) THE CLASS FIELD'S 20-BIT BOUND: the word arm's class readers mask bits 2..21 because bits 24..27 carry the kind code, so a ceiling needing more classes would be SILENTLY TRUNCATED — gcInit now DIES on it, in the word arm only (the val arm's bits 0..60 mask never truncates). Both guards are asserted ABSENT from the val text, so the val arm's emitted IL cannot move"
         (case ( Rt.spliceArm False rawMidText, Rt.spliceArm True rawMidText ) of
             ( Ok valText, Ok wordText ) ->
-                -- (b) the bound: the guard, its reachability argument, and the
-                -- arithmetic the mask IS (2^20 classes, mask 2^20-1)
-                String.contains "if (mkbool(numClasses >= 1048576)) {" wordText
-                    && String.contains "the word arm's class field is bits 2..21" wordText
-                    && not (String.contains "numClasses >= 1048576" valText)
-                    && 1048576
+                -- (b) the bound: WIDENED to the field's documented 22 bits by
+                -- perf word-arm-records THE CEILING (it was masked at 2..21, so
+                -- bits 22/23 were unused and the guard fired at 2^20 classes —
+                -- measured: the whole-compiler emit could not initialise at the
+                -- selfhost's 32768 default).  The guard is now a CANARY: the
+                -- ceiling CLAMP holds numClasses at 2,097,663 for every legal
+                -- budget, and a budget above the clamp is REFUSED BY NAME.
+                String.contains "if (mkbool(numClasses >= 4194304)) {" wordText
+                    && String.contains "the word arm's class field is bits 2..23" wordText
+                    && not (String.contains "numClasses >= 4194304" valText)
+                    && String.contains "heapBytes > 137438953472" wordText
+                    && String.contains "(capWanted > 137438953472) ? mknum(137438953472)" wordText
+                    && not (String.contains "137438953472" valText)
+                    && 4194304
                     == 1024
-                    * 1024
-                    && 1048575
-                    == 1048576
+                    * 4096
+                    && 4194303
+                    == 4194304
                     - 1
                     -- the mask the readers use IS that bound minus one
-                    && List.length (List.filter (String.contains "(flags >> 2) & 1048575") (String.split "\n" wordText))
+                    && List.length (List.filter (String.contains "(flags >> 2) & 4194303") (String.split "\n" wordText))
                     == 4
                     -- (a) code 0's single owner, both halves
                     && String.contains "allocKind(0): code 0 means NO CODE" wordText

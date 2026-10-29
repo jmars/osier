@@ -313,6 +313,7 @@ extern strfromd(buf : ptr, n : i64, fmt : ptr, x : f64) -> i32;
 //                       in the tag dispatch instead of returning plausible
 //                       bytes (the wall-B loudness the plan asked for)
 //   Class readers MASK: (flags >> 2) & ((1073741824 * 2147483648) - 1) (bits 0..60).
+//   The WORD arm's mask is bits 2..23 (4194303) — see gcInit's bound table.
 //
 //   slot 28  young      1 = the nursery is ACTIVE (QBE_MIDGC_YOUNG=1 in the
 //                       environment of a QBE_MIDGC_YOUNG=1 BUILD; the build
@@ -5459,7 +5460,31 @@ defun Rt.gcInit(dummy : val) -> val {
     word capArg = payload(capArgV, 0);
     word ruleCap = payload((heapBytes * 8 < heapBytes + 4294967296) ? mknum(heapBytes * 8) : mknum(heapBytes + 4294967296), 0);
     word knobCap = payload((capArg != 0) ? mknum(capArg * 1048576) : mknum(ruleCap), 0);
-    word capBytes = payload((knobCap < heapBytes) ? mknum(heapBytes) : mknum(knobCap), 0);
+    word capWanted = payload((knobCap < heapBytes) ? mknum(heapBytes) : mknum(knobCap), 0);
+    // >>> QBE_WORDVAL-ONLY
+    // THE CEILING IS CLAMPED TO WHAT THE CLASS FIELD CAN ADDRESS (perf
+    // word-arm-records THE CEILING).  The class table is sized for the ceiling
+    // (`numClasses` below), and the word arm's class field is bits 2..23 — 22
+    // bits, 4194304 classes, 32 KiB each at the ladder's second range — so the
+    // largest addressable ceiling is 128 GiB (2^37).  Without the clamp the 8x
+    // rule cap made a QBE_HEAP_MB=32768 budget ask for a 256 GiB ceiling,
+    // 8,389,120 classes, which no field short of 24 bits can hold, and gcInit
+    // DIED there: MEASURED, the whole-compiler emit under this arm could not
+    // even initialise its heap at the selfhost's default knob.  The clamp keeps
+    // 4x growth headroom at that budget and makes the class bound a HARD
+    // property of the field rather than a knob-dependent hope.
+    //
+    // A BUDGET ABOVE THE CLAMP IS REFUSED BY NAME rather than silently given a
+    // ceiling smaller than itself — the polarity's other direction.
+    if (mkbool(heapBytes > 137438953472)) {
+      call Rt.die(rawstr("qbe-rt: midgc: QBE_HEAP_MB asks for a heap larger than the word arm's largest addressable ceiling (128 GiB, set by the 22-bit class field in header bits 2..23); a bigger heap needs the KIND CODE re-bitted out of bits 24..27"));
+      return mknil;
+    }
+    word capBytes = payload((capWanted > 137438953472) ? mknum(137438953472) : mknum(capWanted), 0);
+    // <<< QBE_WORDVAL-ONLY
+    // >>> QBE_VAL-ONLY
+    word capBytes = capWanted;
+    // <<< QBE_VAL-ONLY
     // THE LAYOUT IS SIZED FOR THE CEILING (never the initial heap): the mark
     // stack must hold one entry per 64-byte block the LARGEST heap this region
     // can become (the F1 theorem below), and the free-list table must have a
@@ -5471,16 +5496,40 @@ defun Rt.gcInit(dummy : val) -> val {
     word markEnd = 64 + capWords / 8 + 64;
     word numClasses = 1 + payload((capWords <= 4096) ? mknum((capWords + 7) / 8) : mknum(512 + (capWords - 4096 + 4095) / 4096), 0);
     // >>> QBE_WORDVAL-ONLY
-    // THE CLASS FIELD'S 20-BIT BOUND, CHECKED (perf VR3c nicety ii): the word
-    // arm's class readers mask bits 2..21 (1048575), because bits 24..27 carry
-    // the KIND CODE.  A class that needs bit 22 or above would be SILENTLY
-    // TRUNCATED by that mask — the sweep's advance, the free-list index and the
-    // verifier would all disagree with the allocator.  The val arm's mask
-    // (bits 0..60) never truncates, so the guard exists only here.  The bound is
-    // reachable: QBE_HEAP_MB is user-settable and the ladder's second range is
-    // 4096-word granular, so ~32 GiB of ceiling is enough to cross it.
-    if (mkbool(numClasses >= 1048576)) {
-      call Rt.die(rawstr("qbe-rt: midgc: this ceiling needs more than 2^20 size classes; the word arm's class field is bits 2..21 (bits 24..27 hold the kind code)"));
+    // THE CLASS FIELD'S 22-BIT BOUND, CHECKED (perf VR3c nicety ii, WIDENED by
+    // perf word-arm-records THE CEILING): the word arm's class readers mask bits
+    // 2..23 (4194303), because bits 24..27 carry the KIND CODE.  A class that
+    // needs bit 24 or above would be SILENTLY TRUNCATED by that mask — the
+    // sweep's advance, the free-list index and the verifier would all disagree
+    // with the allocator.  The val arm's mask (bits 0..60) never truncates, so
+    // the guard exists only here.
+    //
+    // THE FIELD WAS DOCUMENTED AS bits 2..23 AND MASKED AS bits 2..21: the
+    // layout block below (`bits 2..23 class`) and the free-list packing both
+    // assumed 22 bits, so bits 22 and 23 sat UNUSED while the guard fired at
+    // 2^20.  MEASURED at the selfhost's default heap (QBE_HEAP_MB=32768,
+    // ceiling 8x = 256 GiB): numClasses = 8,389,120, which needs 24 bits and so
+    // exceeds EVEN the 22-bit field — see the bound table below.
+    //
+    // THE BOUND, in ceiling terms (numClasses ~= capBytes / 32768):
+    //   2^20 classes  -> ~34 GiB   (the old field)
+    //   2^22 classes  -> ~137 GiB  (this field: QBE_HEAP_MB <= ~17408 at the 8x
+    //                               rule cap)
+    //   2^24 classes  -> ~550 GiB  (needs bits 2..25, which the KIND CODE owns)
+    //   2^26 classes  -> ~2.2 TiB  (would need the kind code moved to bits 28..31)
+    // A ceiling past 128 GiB therefore needs the kind code RE-BITTED, not a
+    // wider mask; that is priced in Mid/RtLayout.elm's worklist and is NOT done
+    // here (the emit's live set is ~250k objects / ~120 MB swept, so the heap
+    // default is over-provisioned rather than the field being too narrow).
+    //
+    // THIS GUARD IS NOW A CANARY, NOT A KNOB-REACHABLE BOUND: the clamp above
+    // holds numClasses at 2,097,663 for every legal budget, so nothing a user
+    // can set reaches it.  It stays because a future widening of the clamp (or
+    // of the ladder's step) that outran the field would be SILENT without it —
+    // the mask would truncate the class and the sweep, the free list and the
+    // verifier would all disagree with the allocator.
+    if (mkbool(numClasses >= 4194304)) {
+      call Rt.die(rawstr("qbe-rt: midgc: this ceiling needs more than 2^22 size classes; the word arm's class field is bits 2..23 (bits 24..27 hold the kind code), i.e. a ceiling past ~137 GiB needs the kind code re-bitted"));
       return mknil;
     }
     // <<< QBE_WORDVAL-ONLY
@@ -6567,7 +6616,7 @@ defun Rt.gcScavPtr(p : val) -> val {
   word cls = (flags >> 2) & ((1073741824 * 2147483648) - 1);
   // <<< QBE_VAL-ONLY
   // >>> QBE_WORDVAL-ONLY
-  word cls = (flags >> 2) & 1048575;
+  word cls = (flags >> 2) & 4194303;
   // <<< QBE_WORDVAL-ONLY
   word phys = payload((cls <= 512) ? mknum(cls * 8) : mknum(4096 + (cls - 512) * 4096), 0);
   val nb = call Rt.gcPromoteAlloc(mknum(cls), mknum(kind), mknum(count));
@@ -7007,7 +7056,7 @@ defun Rt.gcSweep(cursor : val) -> val {
     word cls = (flags >> 2) & ((1073741824 * 2147483648) - 1);
     // <<< QBE_VAL-ONLY
     // >>> QBE_WORDVAL-ONLY
-    word cls = (flags >> 2) & 1048575;
+    word cls = (flags >> 2) & 4194303;
     // <<< QBE_WORDVAL-ONLY
     word phys = payload((cls <= 512) ? mknum(cls * 8) : mknum(4096 + (cls - 512) * 4096), 0);
     if (mkbool(marked == 1)) {
@@ -7247,7 +7296,7 @@ defun Rt.gcVerify(p : val, n : val) -> val {
   word cls = (flags >> 2) & ((1073741824 * 2147483648) - 1);
   // <<< QBE_VAL-ONLY
   // >>> QBE_WORDVAL-ONLY
-  word cls = (flags >> 2) & 1048575;
+  word cls = (flags >> 2) & 4194303;
   // <<< QBE_WORDVAL-ONLY
   word phys = payload((cls <= 512) ? mknum(cls * 8) : mknum(4096 + (cls - 512) * 4096), 0);
   word state = byteload(bm + (pw - heapStart) / 64, 0);
@@ -7324,7 +7373,7 @@ defun Rt.gcVerifyList(node : val, cls : val, acc : val) -> val {
   if (mkbool(((flags >> 2) & ((1073741824 * 2147483648) - 1)) != clsW)) {
   // <<< QBE_VAL-ONLY
   // >>> QBE_WORDVAL-ONLY
-  if (mkbool(((flags >> 2) & 1048575) != clsW)) {
+  if (mkbool(((flags >> 2) & 4194303) != clsW)) {
   // <<< QBE_WORDVAL-ONLY
     call Rt.gcVD(mknum(rawstr("qbe-rt: midgc: VERIFY V5: a free-list link is on the WRONG CLASS list at heap offset ")), mknum(nd - region->heapStart), mknum(regW));
     return mknil;
