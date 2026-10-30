@@ -3616,4 +3616,26 @@ else
   FAIL=1
 fi
 
+# ---- THE NATIVE DRIVER'S ARM MATCHES ITS FLAGS (perf word-arm-host-evals) ----
+# The self-hosted compiler is NOT in Elm's build graph (elm make never type-checks
+# selfhost/NativeMain.elm), so no Elm row can see it.  It emits the WORD arm
+# (`wordVal = True`, matching run.js's default) and must therefore LOAD the word
+# splice; it used `Rt.load`, which IS `loadArm False` (the VAL splice), so the
+# word-arm emitter was handed a val-laid-out runtime: it refused `Rt.recUpd`'s
+# 3-payload-word `mkval(14, ..)` by name and the host lane gave `Rt.apply-at` a
+# non-closure ("host: apply of a non-function value").  MEASURED on the
+# whole-compiler emit, which is the only thing that runs this driver — and that
+# takes ~48 minutes, so this one-second text pin is what makes the regression
+# cheap to catch.
+NATIVE=osier-compiler/selfhost/NativeMain.elm
+if [ ! -f "$ROOT/$NATIVE" ]; then
+  echo "FAIL native-driver-arm: $NATIVE is missing"; FAIL=1
+elif grep -qE 'case Rt\.load rtText of' "$ROOT/$NATIVE"; then
+  echo "FAIL native-driver-arm: the native driver loads the runtime with Rt.load (= loadArm False, the VAL splice) while emitting the WORD arm"; FAIL=1
+elif ! grep -qE 'case Rt\.loadArm True rtText of' "$ROOT/$NATIVE"; then
+  echo "FAIL native-driver-arm: the native driver's runtime load is not the word splice (expected 'Rt.loadArm True rtText')"; FAIL=1
+else
+  echo "PASS native-driver-arm: the self-hosted driver loads the runtime through the SAME arm its flags emit (Rt.loadArm True)"
+fi
+
 exit $FAIL

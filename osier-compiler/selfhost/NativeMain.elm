@@ -282,7 +282,26 @@ ssaJobs entryKey jobs elmTexts =
                 -- per-compileEntry-call.
                 Task.andThen
                     (\rtText ->
-                        case Rt.load rtText of
+                        -- THE ARM MUST MATCH THE FLAGS (perf word-arm-host-evals).
+                        -- This driver emits the WORD arm (`wordVal = True`
+                        -- below, matching run.js's default) but used to load the
+                        -- runtime through `Rt.load`, which IS `loadArm False` —
+                        -- the VAL splice.  So the native compiler spliced a
+                        -- val-laid-out runtime into word-arm code: `Rt.recUpd`'s
+                        -- val body (a 3-payload-word `mkval(14, ..)`) reached the
+                        -- word-arm emitter, which correctly REFUSED it by name,
+                        -- and the host lane's evals blob was val-laid-out so
+                        -- `Rt.apply-at` was handed a non-closure and died with
+                        -- "host: apply of a non-function value".  MEASURED: the
+                        -- whole-compiler emit under this driver failed at 48 min
+                        -- with exactly those two messages; the STOCK compiler
+                        -- (run.js -> Main.elm -> `MidRt.loadArm flags.qbeWordVal`)
+                        -- was always right, which is why every fixture and the
+                        -- corpus passed while the self-hosted emit could not.
+                        -- ONE ARM, ONE SOURCE OF TRUTH: this call now derives it
+                        -- from the SAME `wordVal` the flag record carries, so the
+                        -- two cannot drift apart again.
+                        case Rt.loadArm True rtText of
                             Err msg ->
                                 errLine ("runtime.mid: " ++ msg)
 
