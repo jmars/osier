@@ -6937,6 +6937,39 @@ checks rt rawMidText =
             && String.contains "buf, buf + 8, buf + 16" (code (defunText "Rt.callArity" wordText))
             && String.contains "buf, buf + 40, buf + 80" (code (defunText "Rt.callArity" valText))
         )
+    , check "THE HOST SLOT ARRAY'S ROOT IS PUSHED BY THE DEFUN WHOSE FRAME SPANS THE RUN, NOT BY hostInit (perf andthen-clobber): a root pushed between `frame-enter` and `frame-leave` is truncated by that frame's OWN leave (`Rt.frame-leave` -> `rootPopTo(hdr->wm)`, `wm` snapshotted at enter), and `Rt.hostInit` is classified ALLOCATING on the word arm because the `mknum(blob)` that closes it is a boxing seat — so it HAS a frame, and when it owned the registration the 33031-slot array (the ONLY root for every host-lane Value) was unrooted for the whole run: MEASURED, an andThen continuation in `slot[4]` was reclaimed by the first scavenge and overwritten by the churn's string text.  `Rt.hostRun`'s frame spans the run, so the registration belongs there.  WOULD FAIL: hostInit pushing the root again (the pre-fix tree does), or hostRun not pushing it at all — and the behavioural half is the `andthen` ladder in tools/qbe/word-arm-gcchurn.sh, which is RED at h1/h2/h4 on the pre-fix tree"
+        (let
+            wordText =
+                splicedOr True rawMidText
+
+            valText =
+                splicedOr False rawMidText
+
+            code =
+                codeLines
+
+            pushes text =
+                String.contains "call Rt.rootPushValueArray(" (code (defunText "Rt.hostRun" text))
+                    && not (String.contains "call Rt.rootPushValueArray(" (code (defunText "Rt.hostInit" text)))
+
+            -- THE ROOT IS ESTABLISHED BEFORE THE FIRST STORE INTO THE ARRAY,
+            -- which is what keeps the `mknum` boxing seat from running over a
+            -- written-but-unrooted array.
+            before a b body =
+                case ( List.head (String.indexes a body), List.head (String.indexes b body) ) of
+                    ( Just ia, Just ib ) ->
+                        ia < ib
+
+                    _ ->
+                        False
+         in
+         pushes wordText
+            && pushes valText
+            && before
+                "call Rt.rootPushValueArray("
+                "vecstore(h + 8, 0, vecload(vecbody(prog), 1))"
+                (code (defunText "Rt.hostRun" wordText))
+        )
     , check "HOST PATH PIN: `struct Host`'s blob layout RECOMPUTED from the word-arm splice — the eval table at 264304, npoll/poll at 804976/804984, sizeof 100624 WORDS == 804992 bytes == `8 + (33031 * 8) + (6 * 8) + (128 * 4224) + 16` — and the VAL splice still recomputes 1321296/1861968/1861976/232748 words (1861984 bytes).  `128 * 4224` does NOT move on either arm: `struct HostEv` holds no `val` (its 256 `HostFrame`s are two WORDS each), so the slot array is the malloc literal's only moving term.  A field added to `struct Host` without the malloc line is a RED ROW on BOTH arms, not a heap overflow"
         (let
             wordDecls =

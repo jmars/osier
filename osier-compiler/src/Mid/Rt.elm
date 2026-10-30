@@ -1881,7 +1881,12 @@ rtDeps =
           ( "Rt.hostDieErr", [ "Rt.cStrLenGo" ] )
         , ( "Rt.dieErr", [ "Rt.hostDieErr" ] )
         , ( "Rt.hostNowMs", [] )
-        , ( "Rt.hostInit", [ "Rt.rootPushValueArray" ] )
+        -- hostInit ALLOCATES ONLY: the slot array is EMPTY when it returns, and
+        -- the run-lifetime root is pushed by `Rt.hostRun`.  A root pushed inside
+        -- a frame is truncated by that frame's own leave (MEASURED: the word arm
+        -- gave hostInit a frame for its `mknum` boxing seat and the root died
+        -- there) — see runtime.mid's `Rt.hostInit`.
+        , ( "Rt.hostInit", [] )
         , ( "Rt.hostIsProgram", [ "Rt.cStrEq" ] )
         , ( "Rt.hostArity", [ "Rt.cStrEq" ] )
         , -- STAGE 7 O3-fix: the applier's rawcall set grew by the two non-call
@@ -1915,7 +1920,7 @@ rtDeps =
         , ( "Rt.hostStepAllGo", [ "Rt.hostStep" ] )
         , ( "Rt.hostStepAll", [ "Rt.hostStepAllGo" ] )
         , ( "Rt.hostRunLoop", [ "Rt.hostStepAll", "Rt.hostFlushExpiredSleeps", "Rt.hostRunnableScan", "Rt.hostPollTimeout", "Rt.hostRebuildPollfds", "Rt.hostDrainReady", "Rt.hostReapChildren", "Rt.hostCompleteReady", "Rt.hostReapBlocking", "Rt.dieErr" ] )
-        , ( "Rt.hostRun", [ "Rt.hostInit", "Rt.hostSpawnFromCmd", "Rt.hostRunLoop", "Rt.hostCleanupAll", "Rt.rootPop" ] )
+        , ( "Rt.hostRun", [ "Rt.hostInit", "Rt.rootPushValueArray", "Rt.hostSpawnFromCmd", "Rt.hostRunLoop", "Rt.hostCleanupAll", "Rt.rootPop" ] )
         , -- ===== THE STAGE 7B SYNCHRONOUS LEAVES + THE DEADLINE MACHINERY.
           -- Same rule as the 7A block above: one entry per host defun, exactly
           -- its `call Rt.*` targets.  The prim leaves' targets (Rt.getenv/

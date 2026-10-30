@@ -306,6 +306,30 @@ row host     h1      300  1
 row host     h2      300  1
 row host     h4      300  1
 row host     default 300  1
+# ---- THE Task.andThen CONTINUATION (perf andthen-clobber): the SAME slot array
+#      as `host`, but the Value that matters lives ONLY in it.  `host` passes
+#      with the array unrooted because its model is also reachable through the
+#      compiled update's frame; a continuation closure staged by
+#      `Rt.hostPushFrame` into `slot[base + 2 + n]` is referenced by NOTHING
+#      else, so the first scavenge reclaims it and the churn's next string
+#      allocation is handed the same memory.
+#      MEASURED BEFORE the fix (pre-fix runtime.mid, same fixture): word arm
+#      rc=1 "a heap header carries KIND CODE 0" at h1/h2/h4/64 and rc=0 at
+#      QBE_HEAP_MB=512 (no collection); val arm rc=0 everywhere — NOT because it
+#      roots better, but because `Rt.hostInit` is frame-free there, so the root
+#      it pushed was never truncated: the asymmetry was the FRAME CLASS.
+#      AFTER (QBE_MIDGC_STATS=1, `row()`'s scavenge-OR-full-collect metric):
+#      val/word collections h1 248/220, h2 122/126, h4 60/62 and DEFAULT 4/4 —
+#      all green, "16000/ok" on both arms.  EVERY RUNG IS DECLARED COLLECTING,
+#      including the default one: the first draft of this comment called
+#      `default` a regression row on a QBE_HEAP_MB=512 measurement (0
+#      collections there), and the row then reported 4 on BOTH arms at the real
+#      default knob — the same "a count taken at the wrong knob is not a
+#      measurement of this one" trap the `host` block above records.
+row andthen  h1      240  1
+row andthen  h2      240  1
+row andthen  h4      240  1
+row andthen  default 240  1
 # ---- THE SCANNED-BODY COUNTS (the poisoned-body fix, 2026-10-29): a word-arm
 #      closure cell is ONE code-6 SCANNED block whose body words 1 and 3 are
 #      counts, and the drain walks EVERY body word as a Value — so a RAW count

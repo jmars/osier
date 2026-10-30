@@ -11547,8 +11547,29 @@ defun Rt.hostStatRecord(hN : val, iN : val, stN : val) -> val {
 // byte count can.  258 x 8 bytes x 3 arrays, memset to zero: `hostAddPoll`
 // writes all three of `fd`/`events`/`revents` for an entry it registers, so the
 // zero is the property that a NEVER-REGISTERED cell can never be polled.
+// Rt.hostInit — allocate the host blob and its fd table, and NOTHING ELSE.
+//
+// THE SLOT-ARRAY ROOT AND THE TWO PROGRAM WORDS BELONG TO `Rt.hostRun`, and
+// that split is the fix for a MEASURED rooting defect, not tidying.  A root
+// pushed between `frame-enter` and `frame-leave` is truncated by that frame's
+// OWN leave (`Rt.frame-leave` -> `rootPopTo(hdr->wm)`, and `wm` is snapshotted
+// at enter, BEFORE the frame's own array push).  This defun is classified
+// ALLOCATING on the word arm — the `mknum(blob)` that closes it is a boxing
+// seat — so it HAS a frame there, and when the blob's root was pushed here
+// this defun's leave dropped it before the caller ever got the handle.  The
+// 33031-slot array is the ONLY root for every host-lane Value, so from that
+// moment on the whole host lane ran unrooted: MEASURED on the t7.elm andThen
+// churn, `slot[4]` held a live closure at QBE_HEAP_MB=512 and the churn's own
+// string text "1800x179" at QBE_HEAP_MB=64, at an UNCHANGED address (the block
+// was reclaimed and reused, the slot never updated).  `Rt.hostRun`'s frame
+// spans the whole run, so a root established there lives exactly as long as
+// the blob is used and its leave releases it.
+//
+// NOTHING IS STORED IN THE SLOTS HERE, which is the second half of the fix:
+// the `mknum` below still allocates (it is a boxing seat), and it must run
+// while the array is EMPTY — otherwise the window "values written, not yet
+// rooted" would span that allocation.
 defun Rt.hostInit(progAddrN : val) -> val {
-  word progAddr = payload(progAddrN, 0);
   // >>> QBE_VAL-ONLY
   word bytes = 8 + (33031 * 40) + (6 * 8) + (128 * 4224) + 16;
   // <<< QBE_VAL-ONLY
@@ -11564,15 +11585,6 @@ defun Rt.hostInit(progAddrN : val) -> val {
   rawcall memset(pp, 0, pollBytes);
   lp->npoll = 0;
   lp->poll = pp;
-  call Rt.rootPushValueArray(blob + 8, blob);
-  val prog = vecload(progAddr, 0);
-  vecstore(blob + 8, 0, vecload(vecbody(prog), 1));
-  // >>> QBE_VAL-ONLY
-  vecstore(blob + 8 + 40, 0, vecload(vecbody(prog), 3));
-  // <<< QBE_VAL-ONLY
-  // >>> QBE_WORDVAL-ONLY
-  vecstore(blob + 8 + 8, 0, vecload(vecbody(prog), 3));
-  // <<< QBE_WORDVAL-ONLY
   return mknum(blob);
 }
 
@@ -12474,8 +12486,23 @@ defun Rt.hostRun(progAddrN : val, outAddrN : val) -> val {
   word outAddr = payload(outAddrN, 0);
   val hN = call Rt.hostInit(progAddrN);
   word h = payload(hN, 0);
+  // THE SLOT-ARRAY ROOT IS ESTABLISHED HERE, BEFORE THE FIRST STORE INTO IT,
+  // and in THIS frame because this frame spans the whole run — a root pushed
+  // in `Rt.hostInit` was truncated by that defun's own `frame-leave` on the
+  // word arm (see `Rt.hostInit` for the measurement).  Everything the host
+  // lane keeps in these 33031 slots — the model, the update function, every
+  // continuation `Rt.hostPushFrame` stages — is reachable ONLY through this
+  // registration.
+  call Rt.rootPushValueArray(h + 8, h);
   *Host lp = [*Host](h);
   val prog = vecload(progAddr, 0);
+  vecstore(h + 8, 0, vecload(vecbody(prog), 1));
+  // >>> QBE_VAL-ONLY
+  vecstore(h + 8 + 40, 0, vecload(vecbody(prog), 3));
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  vecstore(h + 8 + 8, 0, vecload(vecbody(prog), 3));
+  // <<< QBE_WORDVAL-ONLY
   // >>> QBE_VAL-ONLY
   vecstore(h + 8 + (33026 * 40), 0, vecload(vecbody(prog), 2));
   // <<< QBE_VAL-ONLY
