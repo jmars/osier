@@ -197,6 +197,19 @@ type alias S =
     , ptrRead : Set String -- VR1: the defuns that READ their params through the incoming `l` pointer (no entry blit); see ptrReadKeys
     , paramPtr : Dict Int Il.Arg -- VR1: binder id -> the incoming `l` pointer holding that param (ptrRead defuns only)
     , noCollect : Set String -- P5: the CALL SYMBOLS whose execution cannot reach a GC safepoint (Mid.Rt.allocating's complement + the non-collecting libc entries); a call to anything else is a safepoint
+    -- A FRAME-FREE SEAT CALLER IS "CANNOT COLLECT", SO THIS SET CANNOT DECIDE A
+    -- FRAME ALONE: a seat that is not in `runtime.allocating` lands here, and a
+    -- SURFACE defun calling it would then be classified frame-free around an
+    -- allocating call — dropping its roots silently, under a collection.  What
+    -- saves it is the OTHER conjunct of P5's predicate, `Liveness.escapesOf`
+    -- counting a call that passes a FRAME ADDRESS (a lean seat call passes
+    -- slot addresses: `call $q_Rt_x2eallocRecord(l %s5, l %s5, l %s5, w 1)`).
+    -- That is a dependency between two files and one ABI property, and it is
+    -- pinned by TestMain's row "A SURFACE DEFUN'S FRAME RESTS ON A NAMED
+    -- CONJUNCT" (it classifies the emitted record probe three ways, including
+    -- the stripped-operand world where the frame IS dropped).  If the lean ABI
+    -- ever stops passing slot addresses, that row is the only thing that will
+    -- say so.
     , leafFree : Bool -- P5's A/B switch (QBE_NOLEAF=1 -> False = every surface defun keeps its pooled frame, i.e. the pre-P5 shape)
     , tailEmit : Bool -- Q1b: may this defun emit a real `tcall`?  TRUE only for an RtGeneric (closure-ABI) body, which is exactly the condition the backend's C4 re-checks — C4 demands the CALLEE's return class EQUAL the enclosing body's, and `closureRetClass` is the one statement of that class (`:val` on both arms)
     , pooledFrame : Bool -- (U1) does this defun hold a POOLED frame (proKind PFrame)?  A DSL `tailcall` must see the block's own `Rt.frame-leave` before it: the pooled block goes back to the pool and the CALLEE's frame-enter may pop and memset the very same block, so a tcall that skipped the leave would orphan (leak) the caller's frame per hop.  A PAlloc block (frame-free lean, rawAbi) dies with the C frame and needs no leave.

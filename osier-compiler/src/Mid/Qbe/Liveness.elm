@@ -630,6 +630,23 @@ offsetOf d a =
 -- ============================ ESCAPES ============================
 
 
+{-| Did a frame address leave this defun?  Evidence: a CALL or TCALL argument
+that is a slot address (`%s<i>`, or the body's own `f + k` derivation), or a
+STORE of one to memory.
+
+THIS IS ONE HALF OF THE FRAME DECISION, AND THE HALF THAT CARRIES THE LEAN
+SEATS.  `Lower.noCollect` (Lower.elm's `noCollect` field) holds every Rt symbol
+outside `runtime.allocating`, so a call to a frame-free seat is NOT a safepoint
+and `allocSite` says "this defun cannot collect".  A SURFACE defun whose only
+allocation is such a call is kept FRAMED only because the lean ABI passes FRAME
+SLOT ADDRESSES to its seats and this function counts that as an escape.  Measured
+on this tree, the emitted record probe `q_Rc_x2el` is framed with
+`allocSite=False` once every call in its body is put in `noCollect` — i.e. by
+this function alone — and goes frame-free the moment its call operands stop being
+addresses.  Pinned by TestMain's row "A SURFACE DEFUN'S FRAME RESTS ON A NAMED
+CONJUNCT", which is the alarm if the lean ABI ever stops passing slot addresses;
+nothing else in the tree sees that dependency.
+-}
 escapesOf : { r | offs : Dict String Int, bad : Set String } -> List Block -> List String
 escapesOf ctx blocks =
     List.concatMap

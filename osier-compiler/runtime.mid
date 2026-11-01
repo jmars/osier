@@ -2524,17 +2524,17 @@ defun Rt.recAppend(rec : val, field : val, newv : val) -> val {
 // name pointers.  The val arm's TWO separate arrays are the same two things
 // here, with the names array's placement decided by the record layout.
 //
-// THE NAMES BLOCK'S KIND CODE IS 1, AND THE NAME LIES (stated, not hidden): a
-// word-arm block whose body is raw, unscanned words has no code of its own —
-// code 1 is the string cell's, whose unit 0 is a self-address and unit 1 a
-// length.  What code 1 BUYS is the SCAN BIT (0), the only property the
-// collector reads, and it is CORRECT here: the body holds static/C-heap name
-// addresses, no Values.  What the lie costs is confined and checkable: this
-// block is NEVER in a Value position — it is reachable only as a record's last
-// body word — so no `tagis` can see it.  `Rt.allocRaw` cannot be used instead:
-// its cell reserves unit 0 for its own byte self-address, so it cannot BE a
-// word array.  THE REAL FIX, if a second consumer ever appears, is a code of
-// its own in the KIND-CONTRACT block (and a row for it), not a second reuse.
+// THE NAMES BLOCK'S KIND CODE IS 1, AND THE NAME LIES.  THE FULL CONTRACT IS
+// STATED ONCE, IN THE KIND-CONTRACT BLOCK BELOW — why 1 is the only code
+// available, the two meanings it carries, the two properties that make the
+// reuse sound (the scan bit is all the collector reads; no `tagis` can see the
+// block), the MEASURED trap that a scanned code here segfaults, and the standing
+// instruction that a second consumer triggers a code of its own.  What belongs
+// at the SITE is the SCOPE of the lie: it is confined to THREE STATEMENTS in
+// this defun — the `allocKind(1, ..)` that builds the block, the `wstore` that
+// fills it, and the `wstore` that tags its base into the record's last body
+// word.  `Rt.allocRaw` cannot stand in for the first: its cell reserves unit 0
+// for its own byte self-address, so it cannot BE a word array.
 //
 // ORDER, and it is load-bearing: the names block's base is written into the
 // record's LAST body word, TAGGED (`+ 1`), BEFORE it is filled — so there is no
@@ -2556,16 +2556,16 @@ defun Rt.recAppend(rec : val, field : val, newv : val) -> val {
   // young-to-young, which needs no barrier at all.
   //
   // THE BLOCK'S HEADER CODE IS 1 (raw body, UNSCANNED) AND THE HOLDER'S CODE IS
-  // 10, and that split is deliberate.  The header code decides the SCAN BIT,
-  // the only property the collector reads: unscanned is CORRECT here (the body
-  // holds name addresses, no Values) and it is also what keeps the walk away
-  // from words that are pointers only by convention — MEASURED: with the header
-  // at code 10 the scavenge WALKS this body and QBE_HEAP_MB=1 SEGFAULTS, because
-  // `gcScavValue` reads a name pointer's low three bits and a name is not
-  // guaranteed to be a Value-shaped word.  The HOLDER is code 10 because a
-  // `:val` frame slot is the only root this surface has and there is no code
-  // that means "raw word array"; the holder never escapes this defun (its only
-  // reader is `vecbody`), so the transient lie is confined to three statements.
+  // 10, and that split is deliberate: the HEADER code decides the SCAN BIT, and
+  // the HOLDER's code is only what makes the block a legal `:val` root for the
+  // length of this defun.  THE TRAP IS MEASURED HERE AND STATED IN FULL IN THE
+  // KIND-CONTRACT BLOCK BELOW: with the header at code 10 the scavenge WALKS
+  // this body and QBE_HEAP_MB=1 SEGFAULTS, because `gcScavValue` reads a name
+  // pointer's low three bits and a name is not guaranteed to be a Value-shaped
+  // word.  The HOLDER is code 10 because a `:val` frame slot is the only root
+  // this surface has and no code means "raw word array"; the holder never
+  // escapes this defun (its only reader is `vecbody`), so the transient lie is
+  // confined to three statements.
   // The parameter of `recAppendNamesGo` therefore means the same thing on both
   // arms — a Value whose `vecbody` is the names array.
   val nnN = mkval(10, vecbody(call Rt.allocKind(mknum(1), mknum(veclen(rec)))));
@@ -2577,6 +2577,11 @@ defun Rt.recAppend(rec : val, field : val, newv : val) -> val {
   val ndN = mkval(14, vecbody(call Rt.allocRecord(mknum(veclen(rec)))));
   call Rt.recAppendDataGo(rec, ndN, packed);
   vecstore(vecbody(ndN), payload(pos, 0), newv);
+  // STATEMENT THREE of the three the contract is confined to: the base goes in
+  // TAGGED (`+ 1`) because `gcScavValue` does NOTHING for tag 0, and the block
+  // it names is code 1 so the collector never WALKS it — the two halves of what
+  // the KIND-CONTRACT block below claims for this shape.  Every reader unmasks
+  // with `nw - (nw & 7)`.
   wstore(vecbody(ndN), veclen(ndN) - 1, vecbody(nnN) + 1);
   return ndN;
 }
@@ -5873,6 +5878,69 @@ defun Rt.allocKind(code : val, count : val) -> val {
 // MEASURED there and by `tools/qbe/word-arm-gcchurn/closchurn.elm`.  A new
 // writer into a body of code 4, 6, 9, 10 or 14 must therefore store a Value, or
 // store a fixnum and own its readers' scaling.
+//
+// ==================== CODE 1 CARRIES TWO MEANINGS, AND THE SECOND ONE IS A
+// NAMING LIE THAT IS SOUND (perf names-contract) ====================
+// This is a CONTRACT, not a local choice at one call site, so it is stated here
+// once and pointed at from the site rather than argued there.  `Rt.recAppend`
+// (word arm) builds a record's field-NAMES array — a block of raw `char*` name
+// words — and the only code it can allocate that block under is 1.
+//
+// WHY 1 AND NOT A CODE OF ITS OWN: the rows below are the VALTAG set, and the
+// ValTag numbering has no integer meaning "raw word array".  `allocRaw` cannot
+// stand in — its cell reserves body unit 0 for its own byte self-address and
+// unit 1 for the length, so it cannot BE a word array — `allocSym` is ONE word
+// and is the symbol's code, `allocFloat`/`boxInt` are one word each under their
+// own codes, and `allocKind(0, ..)` is REFUSED by that seat because 0 means NO
+// CODE.  So the choice is a code from the set below or no block at all, and 1
+// is the set's only unscanned code that is not a fixed-shape cell.
+//
+// THE TWO MEANINGS IT NOW CARRIES, and they are not the same object:
+//   1. A STRING CELL — `Rt.allocRaw`'s block: body unit 0 the cell's own byte
+//      self-address, unit 1 the length, the bytes inline from unit 2.
+//   2. A RAW WORD ARRAY — a runtime-built record names block: EVERY body word
+//      is a name pointer.  Nothing reads the two through one accessor; the
+//      only thing they share is this code and, with it, the scan bit.
+//
+// WHY THE REUSE IS SOUND — TWO PROPERTIES, AND BOTH ARE LOAD-BEARING:
+//   a. THE SCAN BIT IS THE ONLY PROPERTY THE COLLECTOR READS.  `gcScavDrain`
+//      dispatches on header bit 1 and on nothing else, and code 1 derives it
+//      RAW (`heapKindScanned`).  Raw is CORRECT for a names array: its words are
+//      static/C-heap name addresses, never Values, so the collector's behaviour
+//      is exactly the behaviour the array needs.
+//   b. NO `tagis` CAN SEE THE BLOCK.  A names block is never in a Value
+//      position: it is reached ONLY through the record's LAST body word, which
+//      holds it TAGGED (`base + 1`), and EVERY reader unmasks with
+//      `nw - (nw & 7)` — the identity on a literal's static `...000` blob, the
+//      untag on the heap block.  The tag is there for the COLLECTOR, not for
+//      dispatch: `gcScavValue` does NOTHING for tag 0, so an untagged base would
+//      be reclaimed and the record left with a dangling names base, SILENTLY.
+//
+// THE TRAP, AND IT IS MEASURED RATHER THAN ARGUED: A SCANNED CODE ON THESE
+// BLOCKS CORRUPTS THEM.  With the block allocated under code 10 the scavenge
+// WALKS every body word as a Value — `gcScavValue` reads a name pointer's low
+// three bits, and a name is not a Value-shaped word — and the record churn
+// SEGFAULTS at QBE_HEAP_MB=1 (perf word-arm-records R4).  The same reason
+// forbids reusing a scanned code for ANY future raw word array, so this is a
+// rule about the SHAPE, not about this one block.
+//
+// THE STANDING INSTRUCTION: A CODE OF ITS OWN IN BITS 24..27 IS THE HONEST FIX,
+// AND A SECOND CONSUMER IS THE TRIGGER.  It is not a local edit: a new code
+// means changing the literal a seat passes to `allocKind`, that literal is in
+// THIS file, and this file is spliced into every corpus program — so every
+// corpus emit moves and `tools/osier-corpus-baseline.ssa.sha256` needs an
+// OWNER-LEVEL re-freeze.  That price is why the lie is confined to three
+// statements in `Rt.recAppend` instead of being paid today.
+// AS OF THIS WRITING THERE IS EXACTLY ONE CONSUMER, so the trigger has NOT
+// fired: this block is the only GC-heap raw word array in the tree.  The
+// neighbours that look like one are not — the emitter's `recnames:` blob is
+// `.data` (no header, no code, a `...000` address), `Rt.intTab`'s table,
+// `Rt.hostInit`'s slot array and `Rt.globalClosure` are C `malloc` (outside the
+// collector's range test), `Rt.allocSym`/`allocFloat`/`boxInt` are ONE raw word
+// under their own codes, and `Rt.mkStream` is a two-word PAIR under code 11 with
+// no array and no mask.  The day a second raw word array appears: add the code
+// and its row BELOW, take the re-freeze to the owner — and do NOT let this
+// block's reuse carry a third meaning.
 //
 // KIND-CONTRACT: shift 24
 // KIND-CONTRACT: mask 15

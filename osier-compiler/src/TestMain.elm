@@ -26,6 +26,7 @@ import ParserFast
 import Mid.Ir exposing (Alt, AltKind(..), Binder, Defun, Exp(..), FfiWidth(..), LetBinder(..), Lit(..), Match(..), MemWidth(..), RawBinOp(..), RawCmpOp(..), RawFltBinOp(..), RawFltCmpOp(..), RawUnOp(..), Step(..), TailTarget(..), UnsafeNode(..), ValuePath(..))
 import Mid.Module as MidModule
 import Mid.Qbe.Il as Il
+import Mid.Qbe.Liveness as Liveness
 import Mid.Qbe.Lower as QbeLower
 import Mid.Qbe.WordArmProbe as WordArmProbe
 import Mid.QbeModule as QbeModule
@@ -2003,6 +2004,191 @@ checks rt rawMidText =
             _ ->
                 False
         )
+        )
+
+    -- THE LATENT SET IS EMPTY, AND THE PROLOGUE IS WHAT IS PINNED (perf
+    -- word-arm-latent settle).  The class audit table in `Mid/Rt.elm` named
+    -- `Rt.absvector`/`Rt.intern`/`Rt.intInsertAt` — plus `intInsert`/
+    -- `intInsertGo`/`value`, reached one call deeper — as the word arm's LATENT
+    -- set: defuns whose only allocation is an allocation-seat CALL, classified
+    -- frame-free, "safe by non-use / by-value / by-C-heap", each one line from
+    -- the H1 rooting defect.  At HEAD 1aa7a4c all six are `allocating` members
+    -- and all six open their word prologue with a pooled-frame call and
+    -- allocate no stack block.  NOBODY FIXED THEM and no runtime body changed:
+    -- the set closed as a SIDE EFFECT of AREA 4's boxing seat (`wordMkAllocSeat`
+    -- answers `Just "Rt.boxInt"` for `tagNumber`, so every `mknum` is a DIRECT
+    -- safepoint, and every one of these bodies holds one) — and a side effect is
+    -- exactly what regresses unremarked.
+    --
+    -- SO THE ROW ASSERTS THE EMITTED WORD TEXT, not membership: the prologue is
+    -- the surface on which the decision shows, and a row that only re-stated
+    -- `allocating` would pass for ANY reason, including one that stops holding.
+    -- MEASURED fail-able: with `wordMkAllocSeat`'s `tagNumber` arm disabled the
+    -- six leave `allocating` (word set 330 -> 99), their prologues revert to
+    -- `alloc8` stack blocks, and this row goes RED.  The VAL arm is asserted
+    -- beside it (`absvector` rooted by its `allocvec` prim, the other five
+    -- frame-free) so the arm asymmetry that made `absvector` invisible to the
+    -- first single-arm table stays visible here.
+    , check "THE THREE LATENT FRAME-CLASS RISKS ARE ROOTED ON THE WORD ARM AND THEIR EMITTED PROLOGUES ARE PINNED (perf word-arm-latent settle). The audit table in Mid/Rt.elm named Rt.absvector/Rt.intern/Rt.intInsertAt as latent on the word arm, plus intInsert/intInsertGo/value reached one call deeper: defuns whose only allocation is an allocation-seat call, classified frame-free, and safe only by non-use, by-value or by-C-heap. At HEAD 1aa7a4c all six are allocating members and all six open their word prologue with frame-enter and allocate no stack block, because AREA 4's boxing seat (wordMkAllocSeat answering Just \"Rt.boxInt\" for tagNumber) makes every mknum a direct safepoint and every one of these bodies holds one. Nobody fixed them, so the frame class is pinned on the emitted text rather than inferred from the classifier, and the val arm is asserted beside it."
+        ((case ( Rt.loadArm False rawMidText, Rt.loadArm True rawMidText ) of
+            ( Ok valRt, Ok wordRt ) ->
+                let
+                    wordProg =
+                        rtProgram wordRt True True True ++ rtProgramGc wordRt True True True
+
+                    valProg =
+                        rtProgram valRt True True True ++ rtProgramGc valRt True True True
+
+                    -- (frame-enter called, stack block allocated) for one
+                    -- defun under one arm's layout; Nothing when the defun does
+                    -- not lower, so a LOWER ERROR is a FAIL rather than a pass.
+                    prologue layout runtime prog fn entry =
+                        case QbeLower.lowerWith layout runtime False True True True True True True False False True QbeTypes.empty (rtArities prog) prog entry of
+                            Err _ ->
+                                Nothing
+
+                            Ok mod ->
+                                case funcByName fn mod of
+                                    Nothing ->
+                                        Nothing
+
+                                    Just f ->
+                                        Just ( callsSym "q_Rt_x2eframe_x2denter" f, hasAlloc8 f )
+
+                    rootedOn layout runtime prog fn entry =
+                        prologue layout runtime prog fn entry == Just ( True, False )
+
+                    frameFreeOn layout runtime prog fn entry =
+                        prologue layout runtime prog fn entry == Just ( False, True )
+
+                    latent =
+                        [ ( "q_Rt_x2eabsvector", "Rt.absvector" )
+                        , ( "q_Rt_x2eintern", "Rt.intern" )
+                        , ( "q_Rt_x2eintInsertAt", "Rt.intInsertAt" )
+                        , ( "q_Rt_x2eintInsert", "Rt.intInsert" )
+                        , ( "q_Rt_x2eintInsertGo", "Rt.intInsertGo" )
+                        , ( "q_Rt_x2evalue", "Rt.value" )
+                        ]
+                in
+                List.all (\( fn, entry ) -> rootedOn RtLayout.wordLayout wordRt wordProg fn entry) latent
+                    && List.all (\( _, entry ) -> Set.member entry wordRt.allocating) latent
+                    -- the arm asymmetry, stated from the other side
+                    && rootedOn RtLayout.valLayout valRt valProg "q_Rt_x2eabsvector" "Rt.absvector"
+                    && List.all (\( fn, entry ) -> frameFreeOn RtLayout.valLayout valRt valProg fn entry)
+                        (List.drop 1 latent)
+
+            _ ->
+                False
+        )
+        )
+
+    -- THE noCollect/escapesOf LANDMINE, NAMED (perf word-arm-records H1 review
+    -- FINDING 6).  The allocation-seat split feeds `noCollect` — Lower's
+    -- complement of `Mid.Rt.allocating` — and `Liveness.allocCapable` reads it:
+    -- a call to a symbol in `noCollect` is NOT a safepoint.  So a FRAME-FREE
+    -- seat caller is "cannot collect" for Liveness, and P5's decision
+    -- (`leafOk && Liveness.frameFree (classify { noCollect, .. })`,
+    -- Lower.elm's `leaf`) would drop the frame of any SURFACE defun that calls
+    -- one — taking its root registration with it.  TODAY that does not happen;
+    -- this row says WHY, instead of leaving it to luck.
+    --
+    -- THE MEASURED STATE AT THIS TREE (word arm, the emitter's own
+    -- `{ x = 1, y = "hi" }` probe, `q_Rc_x2el`): its calls are frame-enter,
+    -- allocRaw, allocRecord, vecStorePlain x2, frame-leave.  TODAY's `noCollect`
+    -- holds exactly the four NON-allocating ones (frame-enter, frame-leave,
+    -- vecStorePlain x2), so `allocSite` is True and the frame is kept by
+    -- MEMBERSHIP — `Rt.allocRecord` has been in `wordRt.allocating` since the
+    -- AREA 4 `mknum` boxing change (the row above asserts all nine seats).
+    -- THAT IS NOT THE PROTECTION THIS ROW IS ABOUT.  The follow-up that same row
+    -- names — "a seat should not pay a frame for a `mknum` of a COUNT" — moves
+    -- the seats back OUT of `allocating`, and then the ONLY thing keeping a
+    -- surface caller framed is `escapesOf`: a lean seat call passes FRAME-SLOT
+    -- ADDRESSES (`call $q_Rt_x2eallocRecord(l %s5, l %s5, l %s5, w 1)`, and the
+    -- other allocation seats the same way), and `escapesOf` counts any call
+    -- taking a frame address as an escape.  If the lean ABI ever stops passing
+    -- slot addresses, that protection vanishes and NOTHING else names it.
+    --
+    -- SO THE ROW IS THREE POLARITIES ON ONE EMITTED BODY, and the third is what
+    -- keeps the first two from being vacuous:
+    --   (1) TODAY — `classify` with the strictest "every call may collect" set
+    --       answers allocSite=True, and the emitted prologue really does enter
+    --       the pooled frame (asserted on the IL, not inferred from the class).
+    --       `Set.empty` IS "today" for the deciding call and is deliberately
+    --       the stricter spelling: today's `noCollect` holds only the four
+    --       non-allocation-capable helpers named above, which can neither make
+    --       `allocSite` True nor keep it False, and the seat is a safepoint
+    --       under both sets.  Pinning today's exact four symbols instead would
+    --       be a snapshot of `allocating`, which the row above already owns.
+    --   (2) THE BELT — `classify` with EVERY call symbol in `noCollect` (the
+    --       post-follow-up state: no call in this body may collect) answers
+    --       allocSite=FALSE and frameFree=FALSE.  With no safepoint anywhere,
+    --       `escapesOf` is the only thing left that can keep the frame, and it
+    --       does.
+    --   (3) THE FAILURE MODE — the SAME body with every call operand rewritten
+    --       to an immediate (the lean ABI no longer passes slot addresses) and
+    --       the SAME `noCollect` answers frameFree=TRUE: the defun would be
+    --       emitted frame-free around a call that allocates, and its roots would
+    --       be dropped silently, under a collection, with no gate row to see it.
+    -- MEASURED on this tree: (1) allocSite=True, escapes=4, frameFree=False;
+    -- (2) allocSite=False, escapes=4, frameFree=False; (3) allocSite=False,
+    -- escapes=0, frameFree=True.  (2) and (3) are one `classify` call each on
+    -- two bodies that differ ONLY in the operands, so a green here cannot come
+    -- from the analysis answering the same way for everything.
+    , check "A SURFACE DEFUN'S FRAME RESTS ON A NAMED CONJUNCT: a lean seat call passes a FRAME ADDRESS, and that escape keeps the frame when the seat stops being a safepoint (the noCollect/escapesOf landmine)"
+        (case Rt.loadArm True rawMidText of
+            Ok wordRt ->
+                case QbeLower.lowerWith RtLayout.wordLayout wordRt False True True True True True True False False True QbeTypes.empty (rtArities [ recBuildProbe ]) [ recBuildProbe ] "Rc.l" of
+                    Err _ ->
+                        False
+
+                    Ok mod ->
+                        case funcByName "q_Rc_x2el" mod of
+                            Nothing ->
+                                False
+
+                            Just f ->
+                                let
+                                    -- The emitted body's own call symbols, and
+                                    -- the pooled frame's slot count off its
+                                    -- `frame-enter` argument — so `classify` runs
+                                    -- with the SAME nslots the emitter's own P5
+                                    -- decision used (`s1.slot`), not a guess.
+                                    syms =
+                                        callSyms f
+
+                                    nslots =
+                                        Maybe.withDefault 64 (enterSlots f)
+
+                                    cls nc ff =
+                                        Liveness.classify { nslots = nslots, noCollect = nc, layout = RtLayout.wordLayout } ff.blocks
+
+                                    today =
+                                        cls Set.empty f
+
+                                    belt =
+                                        cls (Set.fromList syms) f
+
+                                    stripped =
+                                        cls (Set.fromList syms) (stripFrameAddrs f)
+                                in
+                                callsSym "q_Rt_x2eframe_x2denter" f
+                                    && not (hasAlloc8 f)
+                                    -- (1) TODAY: a safepoint exists, so the
+                                    -- frame is kept by membership.
+                                    && today.allocSite
+                                    && not (Liveness.frameFree today)
+                                    -- (2) THE BELT: no call may collect, and the
+                                    -- frame survives on the escape alone.
+                                    && not belt.allocSite
+                                    && not (Liveness.frameFree belt)
+                                    && not (List.isEmpty belt.escapes)
+                                    -- (3) THE FAILURE MODE: strip the frame
+                                    -- addresses and the frame is dropped.
+                                    && Liveness.frameFree stripped
+                                    && List.isEmpty stripped.escapes
+
+            Err _ ->
+                False
         )
     , check "THE SAFEPOINT WALKER'S `Lit` ARM IS ARM-AWARE — a float or a symbol literal ALLOCATES on the word arm, an immediate does not on either (perf word-arm-floats review)"
         -- SHOULD-FIX 1 OF THE REVIEW, and the trap is the one this unit
@@ -17486,6 +17672,81 @@ callsSym sym f =
                 b.body
         )
         f.blocks
+
+
+{-| Every symbol a func calls DIRECTLY (an indirect call through a temp names
+no symbol and is deliberately not here — it is a safepoint by construction, so a
+caller cannot mistake it for a non-collecting target).
+-}
+callSyms : Il.Func -> List String
+callSyms f =
+    List.concatMap
+        (\b ->
+            List.filterMap
+                (\i ->
+                    case i of
+                        Il.Call _ _ (Il.Sym s) _ ->
+                            Just s
+
+                        _ ->
+                            Nothing
+                )
+                b.body
+        )
+        f.blocks
+
+
+{-| The `nslots` a lowered defun actually entered its pooled frame with — the
+`frame-enter` call's constant argument, which is the emitter's own `s1.slot`.
+Read off the IL rather than guessed, so a Liveness row classifies with the SAME
+slot seed the emitter's P5 decision used (`slotOffsets` seeds `%s<i>` for
+`0 .. nslots-1`, and a seed that is too small cannot see a slot address).
+-}
+enterSlots : Il.Func -> Maybe Int
+enterSlots f =
+    List.head
+        (List.filterMap
+            (\i ->
+                case i of
+                    Il.Call _ _ (Il.Sym "q_Rt_x2eframe_x2denter") [ Il.ArgVal _ (Il.Con n) ] ->
+                        Just n
+
+                    _ ->
+                        Nothing
+            )
+            (List.concatMap .body f.blocks)
+        )
+
+
+{-| THE LEAN ABI'S FRAME-ADDRESS PROPERTY, REMOVED: every call operand that is a
+temp becomes the immediate 0.  This is the "the lean ABI stops passing slot
+addresses" world, used by the noCollect/escapesOf row to show what its own
+assertion is protecting — `escapesOf` reports nothing once no call carries a
+frame address, and a seat caller is then emitted frame-free.  Test-only.
+-}
+stripFrameAddrs : Il.Func -> Il.Func
+stripFrameAddrs f =
+    { f | blocks = List.map (\b -> { b | body = List.map stripInstFrameAddrs b.body }) f.blocks }
+
+
+stripInstFrameAddrs : Il.Inst -> Il.Inst
+stripInstFrameAddrs i =
+    case i of
+        Il.Call r ty sym args ->
+            Il.Call r ty sym (List.map stripArgFrameAddrs args)
+
+        _ ->
+            i
+
+
+stripArgFrameAddrs : Il.CallArg -> Il.CallArg
+stripArgFrameAddrs a =
+    case a of
+        Il.ArgVal ty (Il.Tmp _) ->
+            Il.ArgVal ty (Il.Con 0)
+
+        _ ->
+            a
 
 
 {-| U3a: does a function's own blocks TAIL-CALL a symbol by name?  The

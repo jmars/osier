@@ -412,6 +412,30 @@ groups; WORD-BLOCKED 18 -> 7. The only class left is the host blob, which is a
 with the val arm's 40-byte stride and registered with a collector whose scan
 stride is the layout's), not a construct the classifier refuses.
 
+**SUPERSEDED — AND THE BLOCK ABOVE IS THE TREE IT WAS TAKEN ON, NOT TODAY'S
+CENSUS.** MEASURED at HEAD `1aa7a4c`, `tools/qbe/word-arm-refusals.sh
+--groups`, from the repo root:
+
+```
+BOTH           125  (emit IL on both arms)
+SAME-ERROR      34  (both arms refuse identically: not a word-arm blocker)
+WORD-BLOCKED     0
+
+nothing refuses: every corpus group compiles on the word arm
+```
+
+The one class this section names — the host program path — is CLOSED, and it
+closed as the paragraph above predicts it would have to: the stride was
+TWINNED, not refused. `struct Host`'s one `val[33031]` field became
+`word[33031]`, and the blob, the five scratch cells, the eval `base` slots,
+`Rt.apply-at`'s argument slice and `Rt.callArity`'s `rt_callN` pitch all moved
+with it (54 stride lines in three defun families — STEP 0 below enumerates
+them). `wordArmDefunRefusals` is therefore EMPTY
+(`osier-compiler/src/Mid/Qbe/Lower.elm:1513`), which is why the 7 groups moved
+from WORD-BLOCKED to BOTH instead of leaving the census. 118 / 34 / 7 stays
+here because it was true of the float port's tree; a reader who takes it as the
+current frontier is reading a census SEVEN groups old.
+
 ## The word-arm DIFF fixtures' neighbourhood
 
 The 17 (now 18) `tools/qbe/word-arm-diff/*.elm` fixtures are green on both
@@ -463,14 +487,17 @@ does, and `letpat.elm` is the one that does not.)
    safepoint obligation from WORKLIST item 5 is discharged in the same unit, and
    the fresh defect was the READ (`fload`), not the cell — which already existed
    under a refusal that said it did not. The word arm went 107 -> 118 compiling
-   groups; WORD-BLOCKED 18 -> 7.
-6. **The one class left is the host program path** (7 groups, 7 alone,
-   `Runtime.program`), and it is the first frontier in this arc that is NOT a
+   groups and WORD-BLOCKED 18 -> 7 **at that point** (both have moved since —
+   see item 6).
+6. **The one class left WAS the host program path** (7 groups, 7 alone,
+   `Runtime.program`), and it was the first frontier in this arc that was NOT a
    classifier admission: the event loop's state is one malloc'd blob laid out
    with the val arm's 40-byte stride while the collector scans it at the
    layout's, so the blob size, the slot array stride and every `* 40` move
-   together. `StreamRef` is the classifier's remaining CONTROL (not a plan), and
-   the `App`-argument walk that would name it in a census owes 14 runs first.
+   together. **IT IS TWINNED NOW** — MEASURED at `1aa7a4c`: WORD-BLOCKED 0,
+   BOTH 125, and `wordArmDefunRefusals` empty. `StreamRef` is the classifier's
+   remaining CONTROL (not a plan), and the `App`-argument walk that would name
+   it in a census owes 14 runs first.
 
 ## STEP 0 (perf word-arm-hostpath): THE HOST PATH'S SITE COUNT, ENUMERATED
 
@@ -898,6 +925,12 @@ both arms returned; `B` is the byte length of the byte-identical stdout.
 
 ## THE WORD-ARM GATE PASS (flip-prep): 11 ROWS THE CORPUS CANNOT SEE, AND ALL 11 ARE RED
 
+> **SUPERSEDED — READ THE FLIP SECTION BELOW FIRST (~line 1120).** The eleven
+> rows in this section are **GREEN** at HEAD: AREA 4 landed, and the flip did
+> NOT need the "pin those 11 rows val-only" decision.  The table below is the
+> state at flip PREP, kept because it is the only enumeration of WHICH rows the
+> corpus cannot see; it is not the current gate result.
+
 `QBE_VALREP=word tests/elm-fixtures/run-elm-gate.sh`, from the REPO ROOT, is the
 ONE instrument that runs the gate's non-corpus executable rows on the word arm.
 The corpus run above cannot see any of this BY CONSTRUCTION: `intproc`'s rows
@@ -1208,6 +1241,12 @@ word arm**.
 
 ### THE FLIP IS NOT VERIFIABLE GREEN: three measured word-arm defects
 
+**HISTORICAL — ALL THREE ARE CLOSED.** Defect 1 is superseded by AREA 6
+immediately below; defects 2 and 3 are superseded by the section appended at the
+end of this file ("THE WHOLE-COMPILER CHAIN AND THE FIXED POINT, CLOSED"), which
+carries the measurements. The bullets keep the text they were measured on, which
+is why this marker sits above them rather than editing them.
+
 1. **`clostail-big` is RED on the default arm.** The generic-apply tail chain is
    NOT constant-stack: n=8000 rc 0, **n=9000 SIGSEGV** under an owned 8 MiB
    stack (val flat at n=1e6, 16276 kB). Cause: `Lower.elm`'s `rtCallTwoRange`
@@ -1301,3 +1340,109 @@ why the derived row duplicates the chain.
 seed cannot run the whole-compiler emit (16 GB poisoned-body, 32 GB class
 field), so the `.ssa` fixed point does not close. The flip is NOT gated on that
 here; it is gated on `clostail-big`, which is now green.
+
+**SUPERSEDED — BOTH ARE CLOSED; the measurements are in the section appended at
+the end of this file.**
+
+---
+
+# THE WHOLE-COMPILER CHAIN AND THE FIXED POINT, CLOSED (perf docs-true-up)
+
+**APPEND-ONLY, AND IT SUPERSEDES DEFECTS 2 AND 3 ABOVE, AND THE `STILL OPEN`
+PARAGRAPH THAT ENDS AREA 6.** Records here are append-only; the text those
+defects carry was true of the trees it was measured on. What follows is the
+measurement that overtook it.
+
+PROVENANCE OF THE NUMBERS HERE, stated once because this file's rule is that a
+measurement names the tree it was taken on. RE-MEASURED BY THIS UNIT at
+`1aa7a4c`: the census, the tree state of both fixes (`runtime.mid`'s four masks,
+the clamp and the root move; `wordArmDefunRefusals` empty), the layout census
+and `--status`. QUOTED, NOT RE-RUN: the 50-minute whole-compiler chain in both
+polarities and the 52-minute `--verify` — they were measured by perf
+word-arm-teardown (`handoff-teardown-kind0-result` in the project record),
+neither fits a docs unit's budget, and the chain already carries a fail-before
+beside its pass.
+
+## Defect 2, first half: the 2^20 class field is WIDENED (commit `7815c5b`)
+
+The class field was DOCUMENTED as header bits 2..23 and MASKED as bits 2..21 in
+every reader, while the ceiling guard fired at 2^20 classes. At the selfhost's
+default heap (`QBE_HEAP_MB=32768`) that is 8,389,120 classes and `gcInit` DIED
+before the emit could start, which is why the 32 GB rung printed
+`this ceiling needs more than 2^20 size classes`.
+
+MEASURED IN THE TREE at `1aa7a4c` (read, not inferred): all four class readers
+mask `4194303` (`runtime.mid:6634` `gcScavPtr`, `:7074` `gcSweep`, `:7314`
+`gcVerify`, `:7391` `gcVerifyList`), `gcInit` CLAMPS `capBytes` to
+`137438953472` (`runtime.mid:5486`) and REFUSES a budget above the clamp BY NAME
+(`:5482` — "a bigger heap needs the KIND CODE re-bitted out of bits 24..27"), and
+`Mid/RtLayout.elm:251-259` states the same 22-bit field and the 128 GiB ceiling
+as the contract. `7815c5b`'s own message records the polarity both ways: at
+`QBE_HEAP_MB=32768` the ceiling die is gone and at `200000` it refuses by name.
+The KIND CONTRACT did not move (shift 24, mask 15), which is the mixed-
+representation read that widening a neighbouring field could have caused.
+
+## Defect 2, second half: the poisoned body was the HOST LANE RUNNING UNROOTED (commit `c9a9490`)
+
+`midgc: scavenge read a POISONED (forwarded young) body` at 16 GB was not a
+scavenger bug and not a heap-corruption class of its own. `Rt.hostInit`
+registered the host blob's 33031-slot array — the ONLY root for every host-lane
+Value — but that defun is classified ALLOCATING on the word arm (its closing
+`mknum(blob)` is a boxing seat), so it HAS a frame there, and `Rt.frame-leave`
+does `rootPopTo(wm)` with `wm` snapshotted at enter, BEFORE the frame's own
+push. The registration was therefore truncated by hostInit's OWN leave and the
+whole host lane ran unrooted from the first instruction. The fix moved the root
+to `Rt.hostRun`, whose frame spans the whole run (`runtime.mid:12496`), and left
+hostInit allocating only — with the ORDERING that matters: the `mknum` must run
+over an array nothing has been written into yet.
+
+MEASURED BOTH WAYS, same chain, same container, one variable (the runtime the
+binary EXECUTES — `runtime.mid` is read at run time, so the emitted bytes are
+identical on both sides):
+
+| the whole-compiler chain, `AOTRUN_ARGV=1 QBE_HEAP_MB=32768` | result |
+| --- | --- |
+| the fix in the runtime (HEAD at the time, `c9a9490`) | 38,136,379 B written, stdout `elmc: wrote 1 outputs`, EMPTY stderr, **EXIT 0** |
+| ONLY the root move reverted | the same 38,136,379 B written (`cmp` clean), stdout EMPTY, stderr the KIND-0 sentence verbatim, **EXIT 1** |
+
+So the exit code flips 1 -> 0 with byte-identical emit, and the 50-minute run
+demonstrably COLLECTED (a 60 s slice at the same knob prints 44 scavenges + 2
+full collects), which is the part that matters for a defect whose read was
+collect-dependent. The 16 GB rung itself was NOT re-run in this unit; the
+failure it printed was the same unrooted host lane, which was measured at the
+32 GB default both ways.
+
+## Defect 3: the `.ssa` fixed point DOES close
+
+`tools/qbe-bootstrap.sh --verify` at `1aa7a4c` builds the compiler from the
+COMMITTED seed and that compiler re-emits the seed byte-for-byte — 38,136,379 B,
+`FIXED POINT`, exit 0 (3132.5 s, node and elm not invoked). The seed was
+re-frozen to exactly that emit in the same commit (`--freeze` 34.0 s, ABI marker
+`bb739cd1…`), so the seed is the WORD ARM's emit and the tree's strongest single
+oracle is green at word scale.
+
+RE-MEASURED HERE, the cheap half (`tools/qbe-bootstrap.sh --status`, 40 s):
+
+```
+seed 38136379 bytes, 4f5ec19e81da015e…
+abi-marker bb739cd1e058dc05d6fe40c37ecfa84cd9c74c2a90022a377fec22fd849a443a
+abi  DRIFTED — the emit inputs moved since the seed was frozen (expected; still bootstraps)
+exact FRESH — the selfhost emit reproduces the committed seed byte-for-byte
+```
+
+`DRIFTED` is the emit-INPUTS digest and not the marker: the marker above is the
+one `abi-fingerprint.sh` computes from THIS tree, so the ABI half is fresh and
+`--check` would pass. `--status` prints `DRIFTED` on any tree whose compiler
+sources have uncommitted edits, which is the ordinary state during a unit.
+
+## What this does NOT say
+
+`WORD-BLOCKED = 0` is still not evidence that the arm is correct, and the
+sentence that closed the old section still stands: a census reads EMITS. What
+changed is narrower and worth stating exactly — the arm compiles every corpus
+group, the whole-compiler emit runs to completion and exits honestly, and the
+`.ssa` fixed point closes. The correctness evidence remains the behavioural
+gates (the `word-arm-gcchurn` ladders under real collections, `word-arm-diff`
+both arms, the 190-row elm gate on all three arms), and the perf gap the flip
+section records (the word arm 2-3x slower on the call family, its frame gate 7%
+under the bound) is untouched by any of this.

@@ -1269,7 +1269,13 @@ valLayout =
 --      the record left with a dangling names base, silently).  A runtime-built
 --      names block is a code-1 raw word array, and the naming lie is stated at
 --      the site: code 1 buys the SCAN BIT, which is the only property the
---      collector reads.  `Rt.recInsert` needs no twin (it forwards).
+--      collector reads.  THE FULL CONTRACT now lives in runtime.mid's
+--      KIND-CONTRACT block (why 1 is the only code available, the two meanings
+--      it carries, the two load-bearing properties, the measured trap that a
+--      SCANNED code corrupts these blocks, and the standing instruction that a
+--      code of its own is the honest fix with a second consumer as the
+--      trigger); the three statements at `Rt.recAppend` point at it.
+--      `Rt.recInsert` needs no twin (it forwards).
 --      THE RECORD-SIDE CENSUS IS CLOSED (perf word-arm-records THE CEILING,
 --      Part B).  FOURTEEN record shapes probed directly on the word arm —
 --      literal, walk read, positional read, closed update, open-row update,
@@ -1326,14 +1332,22 @@ valLayout =
 --      ARM at the time it was written, and nothing re-tests it — so a construct
 --      that reaches the top of the refusal ranking must be RE-MEASURED, not
 --      re-read.
---      THE FRONTIER, MEASURED AGAIN AFTER THE FLOAT/F/ PORT (perf
---      word-arm-floats, `tools/qbe/word-arm-refusals.sh --groups`): 118 groups
---      compile on both arms (74 -> 88 -> 107 -> 118 over this arc's four ports),
---      34 refuse identically on both, and SEVEN are word-blocked — all of them
---      by ONE class, the host program path (`Runtime.program`, refused by name
---      since perf word-arm-letdestr).  So the classifier's remaining classes are
---      GONE from the census: the frontier is no longer a construct list, it is
---      the host blob's val-arm stride, which is a runtime.mid layout job.
+--      THE FRONTIER, MEASURED AGAIN (perf docs-true-up,
+--      `tools/qbe/word-arm-refusals.sh --groups`, HEAD 1aa7a4c): 125 groups
+--      compile on both arms (74 -> 88 -> 107 -> 118 -> 125 over this arc's five
+--      ports), 34 refuse identically on both, and ZERO are word-blocked —
+--      "nothing refuses: every corpus group compiles on the word arm".  The
+--      paragraph that stood here said 118 / 34 / 7 and named ONE remaining
+--      class, the host program path (`Runtime.program`).  THAT CLASS IS CLOSED,
+--      and how it closed is recorded at the empty `wordArmDefunRefusals` in
+--      `Mid/Qbe/Lower.elm`: the DEFUN was never the blocker, the HOST BLOB's
+--      val-arm stride was, so twinning the stride (`struct Host`'s one
+--      `val[33031]` field -> `word[33031]`, 54 stride lines in three defun
+--      families; STEP 0 of WORD-ARM-FRONTIER.md enumerates them) admitted the
+--      7 groups instead of deleting a refusal.  So the classifier's remaining
+--      classes are GONE from the census AND the host blob's stride is gone with
+--      them; what is left of the frontier is not a construct list and not a
+--      layout job.
 --      THE PER-DEFUN VIEW IS NOT THE WHOLE STORY, and the last two units
 --      measured the difference twice: 26 let-destructuring groups were
 --      "26 alone" and 19 moved, because 7 emitted cleanly and were WRONG at run

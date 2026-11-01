@@ -2466,6 +2466,12 @@ the whole defect class, which IS an arm asymmetry.  Measured by dumping
 `runtime.allocating` through a scratch compiler under each arm and diffing: exactly
 TWO defuns differ, and both are rows this table had wrong or missing.
 
+THE DIFF IS 244 DEFUNS AT HEAD 1aa7a4c (val 86 members, word 330) — the METHOD is
+unchanged, the NUMBER is not, and the reason is the same seat row that closed the
+latent set (see the summary below).  So "dump it per arm and diff" is still the
+instruction; "exactly two differ" was a reading of the tree it was taken on, not a
+property of the arms.
+
 | defun | allocates by | val | word | verdict |
 |---|---|---|---|---|
 | `Rt.recAppend` | seats allocKind+allocRecord | ROOTED | ROOTED | FIXED. Was word-frame-free: `rec` went stale on the first promotion inside `allocKind` (the h1 SEGV). |
@@ -2477,20 +2483,39 @@ TWO defuns differ, and both are rows this table had wrong or missing.
 | `Rt.stage-tail` | `allocvec` prim directly | ROOTED | ROOTED | SAFE (member by the `direct` seed). |
 | `Rt.shen.str->bytes` | reaches `Rt.cons` via `bytesBuild` | ROOTED | ROOTED | SAFE (member through the `rtDeps` chain). Was ABSENT from the first table (review FINDING 1, second-order). |
 | `Rt.mkStream` | seat allocKind (word) | frame-free | **ROOTED** | SAFE ON THE WORD ARM **BECAUSE IT IS ROOTED** — and it is the one seat that MUST be. Its `allocKind` call is its FIRST statement and it reads `payload(what,0)`/`payload(flags,0)` AFTER it, so it holds two `:vals` across the allocation. The first version of this table called it frame-free and listed it as a latent risk; that was WRONG (review FINDING 2) and "restoring" it to frame-free would create the defect. It is frame-free on the val arm only because it is absent from the val splice. |
-| `Rt.absvector` | seat allocKind (word twin) | ROOTED | **frame-free** | SAFE BY NON-USE today, and it was MISSING from the first table entirely (review FINDING 1) — the arm asymmetry this table exists to catch, invisible to a single-arm dump. Its word body is `vecbody(allocKind(...))` then `mkval(10, body)`; `cnt` is consumed in the ARGUMENTS and only the fresh body is read after, so nothing is live across the call. Aggravator: its `rtDeps` row is EMPTY, so nothing propagates allocating through it either. The condition that would break it: reading `cnt` (or any `:val`) after the allocation. |
-| `Rt.intern` | seat allocKind (word HIT path) | frame-free | frame-free | SAFE BY NON-USE, latent: at the `allocKind` call its only `:val` (`str`) is already reduced to `dataPtr`/`len` and never read again. Effect-host-only on this arm, so no surface fixture reaches it. |
-| `Rt.intInsertAt` | seat allocKind (word) | frame-free | frame-free | SAFE BY C-HEAP: the only live word across the allocation is a `malloc`'d buffer, outside the GC heap, so the scavenger's range test never moves it. |
-| `Rt.intInsert` | reaches `allocKind` via `intInsertAt` | frame-free | frame-free | SAFE BY NON-USE. The first table's reason ("allocate nothing — malloc only") was FALSE: it DOES reach a seat, one call deeper (review FINDING 1, second-order). |
-| `Rt.intInsertGo` | reaches `allocKind` via `intInsertAt` | frame-free | frame-free | SAFE BY NON-USE: it reads its `:val` params after `intGrow`, which is C-heap only. Same FALSE reason corrected as `intInsert`. |
-| `Rt.value` | reaches `allocKind` via `intern` | frame-free | frame-free | SAFE BY NON-USE. ABSENT from the first table (review FINDING 1, second-order). |
+| `Rt.absvector` | seat allocKind (word twin) + a `mknum` | ROOTED | **ROOTED** | LATENT WHEN WRITTEN, CLOSED AT AREA 4 — and NOBODY FIXED IT. Its word body is `vecbody(allocKind(...))` then `mkval(10, body)`; `cnt` is consumed in the ARGUMENTS and only the fresh body is read after, so nothing is live across the call — which is why this table called it SAFE BY NON-USE, and it was MISSING from the first table entirely (review FINDING 1). What changed is not the body but the SEAT TABLE: its `mknum(10)` is a DIRECT safepoint once `wordMkAllocSeat` answers `Just "Rt.boxInt"` for `tagNumber` (AREA 4 STAGE 2, 339a7d9), so the classifier roots it and the word prologue opens `%f =l call $q_Rt_x2eframe_x2denter(l 5)`. THE AGGRAVATOR STILL STANDS: its `rtDeps` row is EMPTY, so nothing propagates allocating to it — that one seat row is the whole protection, which is why the frame class is pinned in TestMain. MEASURED per arm: word `frame-enter`, no stack block; val `frame-enter` too (its `allocvec` prim). The condition that would un-root it: a `mknum` that stops being a safepoint. |
+| `Rt.intern` | seat allocKind (word HIT path) + `mknum`s | frame-free | **ROOTED** | LATENT WHEN WRITTEN, CLOSED AT AREA 4 by the same ONE seat row as `absvector`: its word body's `intTab(mknum(0))`, `intFindGo(mknum(dataPtr), ...)` and `allocKind(mknum(2), mknum(1))` are direct safepoints under `wordMkAllocSeat`'s `tagNumber` answer. The old non-use reason still describes the BODY (at the `allocKind` call its only `:val` (`str`) is already reduced to `dataPtr`/`len` and never read again) and it is still effect-host-only on this arm, so no surface fixture reaches it — the FRAME, not a fixture, is what keeps it safe. MEASURED: word `frame-enter(l 15)`, no stack block; val `alloc8 440`. |
+| `Rt.intInsertAt` | seat allocKind (word) + `mknum`s | frame-free | **ROOTED** | LATENT WHEN WRITTEN, CLOSED AT AREA 4 by the same seat row (`allocKind(mknum(2), mknum(1))`). The old SAFE BY C-HEAP reason still describes the body — the only live word across the allocation is a `malloc`'d buffer, outside the GC heap, so the scavenger's range test never moves it — and that was a reason it was SAFE, never a reason it was rooted. MEASURED: word `frame-enter(l 16)`, no stack block; val `alloc8 480`. |
+| `Rt.intInsert` | reaches `allocKind` via `intInsertAt`; own `mknum`s | frame-free | **ROOTED** | LATENT WHEN WRITTEN, CLOSED AT AREA 4 — and now by its OWN body, not by the chain: its `mknum(n)` arguments are direct safepoints under the seat row, so it no longer depends on reaching `intInsertAt`. The first table's reason ("allocate nothing — malloc only") was FALSE and stays corrected: it DOES reach a seat, one call deeper (review FINDING 1, second-order). MEASURED: word `frame-enter(l 10)`, no stack block; val `alloc8 400`. |
+| `Rt.intInsertGo` | reaches `allocKind` via `intInsertAt`; own `mknum`s | frame-free | **ROOTED** | LATENT WHEN WRITTEN, CLOSED AT AREA 4 the same way as `intInsert` (`mknum(payload(nN, 0))` is the safepoint). The old reason is kept because it is still true of the body: it reads its `:val` params after `intGrow`, which is C-heap only. Same FALSE reason corrected as `intInsert`. MEASURED: word `frame-enter(l 10)`, no stack block; val `alloc8 400`. |
+| `Rt.value` | reaches `allocKind` via `intern`; own `mknum`s | frame-free | **ROOTED** | LATENT WHEN WRITTEN, CLOSED AT AREA 4 the same way (`valScanGo(mknum(tab), ...)` and `cStrLenGo(mknum(payload(sym, 0)), ...)` are the safepoints). ABSENT from the first table (review FINDING 1, second-order). MEASURED: word `frame-enter(l 9)`, no stack block; val `alloc8 440`. |
 | `Rt.snd` | — | frame-free | frame-free | NOT IN THE CLASS, measured: its body is one `vecload(vecbody(x), 1)` and calls no seat. The diagnosis listed it as a hypothesis; the body scan refutes it. |
 | the record walkers (`recUpdFind`/`recUpdCopy`/`recAppendFind`/`recAppendDataGo`/`recAppendNamesGo`), `intGrow`/`intTab` | — | frame-free | frame-free | NOT IN THE CLASS: they allocate nothing. |
 | the SEVEN true seats (`allocKind`/`allocRecord`/`allocSym`/`allocCons`/`allocVector`/`allocRaw`/`allocFloat`) and `gcAlloc`/`gcInit` | their own `gcAlloc` | frame-free | frame-free | CORRECT, and must stay so: each holds no `:val` across its own allocation, and for `gcAlloc`/`gcInit` a registered frame would be a hazard. `Rt.mkStream` is NOT in this group — see its row. |
 
-SUMMARY OF THE CORRECTED COUNT: on the WORD arm, 3 defuns are latent (absvector,
-intern, intInsertAt — plus the non-use-only `intInsert`/`intInsertGo`/`value`
-reached one call deeper); the first table's "3 latent" counted `mkStream`, which is
-rooted, and missed `absvector`, which is not.
+SUMMARY OF THE CORRECTED COUNT, RE-MEASURED AT HEAD 1aa7a4c (perf word-arm-latent
+settle): on the WORD arm **ZERO** defuns in this table are latent.  The three it
+named — `absvector`, `intern`, `intInsertAt` — plus the three reached one call
+deeper (`intInsert`/`intInsertGo`/`value`) are ALL `allocating` members and ALL open
+their word prologue with `frame-enter` and allocate no stack block.  The first
+table's "3 latent" counted `mkStream`, which is rooted, and missed `absvector`, which
+was not — that correction stands as history; what does not stand is the latent set.
+
+NOTHING FIXED THEM, AND THAT IS THE POINT.  The closure is a SIDE EFFECT of AREA 4's
+boxing seat (339a7d9, 2026-10-29): `wordMkAllocSeat` answering `Just "Rt.boxInt"` for
+`tagNumber` makes every `mknum` a DIRECT safepoint, and every body here holds one.  A
+side effect is exactly what regresses unremarked, so the FRAME CLASS of all six is
+pinned on the emitted word text by TestMain's "...THREE LATENT FRAME-CLASS RISKS..."
+row — the prologue, not the classifier's agreement.  MEASURED BOTH WAYS, one line of
+`wordMkAllocSeat` disabled in a scratch edit: the six fall out of `allocating` (word
+set 330 -> 99), their prologues go back to `alloc8` stack blocks (40/120/128/80/80/72
+bytes) — i.e. the state this table recorded — while `mkStream` and `recAppend` STAY
+rooted.  So the six ride on that ONE seat row and not on a shared edge.
+
+THE VAL ARM DID NOT MOVE: `absvector` was and is rooted (its `allocvec` prim, a
+DIRECT safepoint there), the other five are frame-free there (`alloc8` 440/480/400/
+400/440).  So this is still the arm asymmetry the table exists to catch; it has
+simply flipped direction, and a single-arm dump would still see only half of it.
 -}
 allocSeatDeps : List ( String, List String )
 allocSeatDeps =

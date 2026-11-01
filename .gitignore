@@ -38,3 +38,4 @@ tools/bench/elm-corpus/MODINDEX.tsv
 tools/bench/elm-corpus/.sweep-one.sh
 tools/qbe/.wip/
 tests/elm-fixtures/out/progio.out
+.cnc/wt/
