@@ -887,6 +887,48 @@ intreject inttoobigparse 'parse error at row 16 column 5: integer literal `99999
 intreject inttoobig      'integer literal `9223372036854775808` is out of range: it is the magnitude of INT64_MIN'
 intreject inttoobighex   'integer literal `9223372036854775808` is out of range: it is the magnitude of INT64_MIN'
 
+# ============ AREA 4 FOLLOW-UP: the BOXED-INT x FLOAT reader pair ============
+# The word arm BOXES an Int outside the i61 fixnum range into a code-13 heap
+# cell (`Rt.boxInt`), and `payload(x, 0)` is the unbox.  Every other reader of
+# a boxed value was pinned by a row; `Rt.+`'s FLOAT arm was not — and it is the
+# one reader that has to unbox a boxed int while its other operand is a float:
+#
+#   mkflt(fload(asF(a)) f+ fload(asF(bb)))      (Rt.+, runtime.mid)
+#   asF = mkflt(itof(payload(x, 0)))            (Rt.asF, runtime.mid)
+#
+# Nothing in the tree reached that pair, so a regression in it is a SILENT
+# wrong double with rc 0 (MEASURED: the one-instruction mutation below).
+#
+# WHY THE FIXTURE'S 2^60 REALLY BOXES.  `Mid/RtLayout.wordFixnumLimit` is
+# 1152921504606846976 (2^60) at this HEAD, EXCLUSIVE in magnitude (`-limit <=
+# n < limit`), so 2^60 is the first value that does not fit; the emitted
+# `q_Boxfloat_x2ebig` contains `call $q_Rt_x2eboxInt` and no `n * 8` shift.
+# It is also above 2^53, so it travels as digits and is rebuilt from limbs.
+#
+# WHY `Basics.toFloat` DOES NOT CONVERT FIRST: on the word arm an Int and a
+# Float are both one word, so `Prelude.basicsToFloat` hands the SAME word on —
+# the boxed cell's word reaches `Rt.+`, and the unbox happens in `asF` INSIDE
+# the float arm.  The rows therefore pin the unbox, not an adjacent
+# conversion.  (Without a genuine float operand the expression falls to
+# `Rt.+`'s INT arm instead — `toFloat big + toFloat big` prints the exact i64
+# `2305843009213693952`, not a float rendering — which is why every entry in
+# boxfloat.elm carries a real float operand.)
+#
+#   boxadd     boxed on the LEFT of the add.
+#   boxaddrev  boxed as the SECOND argument (the two `asF` sites are separate).
+#   boxbigsum  the result path at scale: the sum is past INT64_MAX, so it can
+#              only be a float — nothing on that path may re-box it.
+#
+# THE EXPECTATIONS ARE THE VAL ARM'S (the differential oracle, as for every row
+# here): the val arm never boxes, so it reaches the same doubles another way.
+# FAIL-ABILITY, MEASURED without touching the tree: replacing the `loadl` of
+# `asF`'s heap arm in the emitted .ssa with `sar %t20, 3` (no unbox) turns all
+# three rows RED at rc 0 — 17567033390210.5 / 17482234317962.5 /
+# 10000017582384234000.0 instead of the pinned values.
+intproc boxfloat boxadd    0 "1152921504606847000.0"   ""
+intproc boxfloat boxaddrev 0 "1152921504606847000.0"   ""
+intproc boxfloat boxbigsum 0 "11152921504606847000.0"  ""
+
 # ==================== L1: the `^` operator ====================
 # `^` was already in the parser (Elm's precedence 8, right-associative); what did
 # not exist was a checker row, a lowering row and a runtime prim, so every `^`

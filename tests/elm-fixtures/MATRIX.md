@@ -19,8 +19,8 @@ The dump it is rendered from (no elm/node/jq needed in that mode):
 ELM_GATE_MATRIX=/tmp/matrix.tsv tests/elm-fixtures/run-elm-gate.sh
 ```
 
-**190 registered checks.** Run from the repo root, the gate prints
-`PASS=190 FAIL=0` on the frozen artifact. `docs/research/osier-paper.md`
+**193 registered checks.** Run from the repo root, the gate prints
+`PASS=193 FAIL=0` on the frozen artifact. `docs/research/osier-paper.md`
 **Appendix A** is the paper's prose counterpart: the *designed* programs the
 paper cites, with the claim each one pins. Appendix A is a selected subset;
 this file is the complete registry. Where the two disagree, **this file and the
@@ -241,11 +241,14 @@ fails loudly rather than letting this listing go stale.
 | 183 | `inttoobigparse` | `intreject` | — | `parse error at row 16 column 5: integer literal `99999999999999999999` is out of range: this language's Int is a signed 64-bit integer` | — | — | `inttoobigparse.elm` |
 | 184 | `inttoobig` | `intreject` | — | `integer literal `9223372036854775808` is out of range: it is the magnitude of INT64_MIN` | — | — | `inttoobig.elm` |
 | 185 | `inttoobighex` | `intreject` | — | `integer literal `9223372036854775808` is out of range: it is the magnitude of INT64_MIN` | — | — | `inttoobighex.elm` |
-| 186 | `intpow` | `intproc` | `powsmall` | `0\|1024\|` | — | — | `intpow.elm` |
-| 187 | `intpow` | `intproc` | `powzero` | `0\|1\|` | — | — | `intpow.elm` |
-| 188 | `intpow` | `intproc` | `powwrap` | `0\|0\|` | — | — | `intpow.elm` |
-| 189 | `intpow` | `intproc` | `powbig` | `0\|4052555153018976267\|` | — | — | `intpow.elm` |
-| 190 | `intpow` | `intproc` | `powneg` | `1\|\|qbe-rt: negative exponent: `^` requires an exponent >= 0` | `1` | — | `intpow.elm` |
+| 186 | `boxfloat` | `intproc` | `boxadd` | `0\|1152921504606847000.0\|` | — | — | `boxfloat.elm` |
+| 187 | `boxfloat` | `intproc` | `boxaddrev` | `0\|1152921504606847000.0\|` | — | — | `boxfloat.elm` |
+| 188 | `boxfloat` | `intproc` | `boxbigsum` | `0\|11152921504606847000.0\|` | — | — | `boxfloat.elm` |
+| 189 | `intpow` | `intproc` | `powsmall` | `0\|1024\|` | — | — | `intpow.elm` |
+| 190 | `intpow` | `intproc` | `powzero` | `0\|1\|` | — | — | `intpow.elm` |
+| 191 | `intpow` | `intproc` | `powwrap` | `0\|0\|` | — | — | `intpow.elm` |
+| 192 | `intpow` | `intproc` | `powbig` | `0\|4052555153018976267\|` | — | — | `intpow.elm` |
+| 193 | `intpow` | `intproc` | `powneg` | `1\|\|qbe-rt: negative exponent: `^` requires an exponent >= 0` | `1` | — | `intpow.elm` |
 
 ---
-Generated from `tests/elm-fixtures/run-elm-gate.sh`; 190 checks.
+Generated from `tests/elm-fixtures/run-elm-gate.sh`; 193 checks.

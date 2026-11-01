@@ -94,9 +94,17 @@ MANIFEST="$(ELM_GATE_MANIFEST_ONLY=1 "$GATE" 2>/dev/null)" || {
 [ -n "$MANIFEST" ] && [ -f "$MANIFEST" ] || {
   echo "word-arm-corpusrun: no manifest path from the gate" >&2; exit 2; }
 
+# DEDUPE BY GROUP NAME.  The manifest registers `sub` TWICE (two argument
+# vectors), so `.groups[]` yields two byte-identical plan lines.  Phase 1 drives
+# those lines through `xargs -P`, so the duplicate builds `sub` twice
+# CONCURRENTLY into the same $W/val/sub.ssa and $W/bin/sub.* — a truncated .s or
+# a cc reading a half-written one is the "BUILD-FAIL 1 sub" this gate showed
+# intermittently.  The argument vectors come from `vectors.tsv` (keyed by
+# fixture+entry), NOT from this plan, so keeping the first occurrence loses no
+# coverage: phase 2 still joins BOTH vectors onto the one group.
 jq -r '.groups[] | [(.output | split("/")[-1] | sub("\\.ssa$"; "")),
                    (.sources | join(" ")), .entry] | join("|")' \
-  "$MANIFEST" > "$WORK/plan.tsv"
+  "$MANIFEST" | awk -F'|' '!seen[$1]++' > "$WORK/plan.tsv"
 [ -s "$WORK/plan.tsv" ] || { echo "word-arm-corpusrun: empty plan" >&2; exit 2; }
 
 # ---- the gate's own ARGUMENT VECTORS, per (fixture, entry fn) --------------
@@ -347,7 +355,16 @@ print("  SAME-ERROR (not runnable)    %3d  (both arms refuse: not an arm gap)"
       % len(same_error))
 print("  WORD-BLOCKED (not runnable)  %3d" % len(blocked))
 if build_fail:
-    print("  BUILD-FAIL                   %3d  %s" % (len(build_fail), " ".join(build_fail)))
+    print("  BUILD-FAIL                   %3d" % len(build_fail))
+    # ONE LINE PER FAILED GROUP, carrying the reason phase 1 already recorded in
+    # $W/status/$name.build (the qbe/cc first line).  A gate that names a group
+    # but not a reason costs a whole 22-minute run to diagnose.
+    for n in build_fail:
+        p = os.path.join(W, "status", n + ".build")
+        reason = "no reason recorded"
+        if os.path.exists(p):
+            reason = open(p, errors="replace").read().strip().split("\n")[0]
+        print("    %-26s %s" % (n, reason[:200]))
 if not_run:
     print("  BOTH but NOT RUN             %3d  %s" % (len(not_run), " ".join(not_run)))
 

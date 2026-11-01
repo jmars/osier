@@ -218,12 +218,63 @@ runSsa entryKey text =
             errLine "manifest has no groups"
 
         Ok jobs ->
-            runSsaJobs entryKey jobs
+            -- A MANIFEST NAMES FILES, AND A FILE THAT IS NOT THERE IS A
+            -- REFUSAL BY NAME, NOT AN EMPTY COMPILE.  `Io.readFile` maps a
+            -- failed open to "" (the host lane's documented M6 arm,
+            -- Rt.hostLeafReadFile), so without this check the group compiles
+            -- empty text and the output is the CORE's complaint about it:
+            -- MEASURED, `nosuchfile.elm` -> exit 0, "elmc: wrote 1 outputs",
+            -- and a 60-byte output reading `err parse error at row 1 column 1:
+            -- expected keyword `module``.  run.js (the twin this driver must
+            -- match) instead throws ENOENT and exits 1, so the two lanes
+            -- disagreed about whether the manifest was even valid.  The
+            -- existence probe is a STAT, not a read: it costs one syscall per
+            -- named source and it names the FIRST missing path, which is what
+            -- a reader of a 78-file selfhost manifest needs.
+            --
+            -- Explicit `.mid` paths are manifest sources too and are checked
+            -- the same way; an `import X` whose `<dir>/X.mid` does not exist is
+            -- NOT checked, because that is an Elm import, not a manifest entry
+            -- (run.js's rule, mirrored in `resolveExisting`).
+            Task.andThen
+                (\missing ->
+                    case missing of
+                        Just path ->
+                            errLine ("source not found: " ++ path)
+
+                        Nothing ->
+                            runSsaJobs entryKey jobs
+                )
+                (firstMissing (allSourcePaths jobs))
 
 
 runSsaJobs : String -> List Job -> Runtime.Task x String
 runSsaJobs entryKey jobs =
     Task.andThen (ssaJobs entryKey jobs) (readAll (allElmPaths jobs))
+
+
+-- Every path the manifest NAMES, Elm and .mid alike, in manifest order.
+allSourcePaths : List Job -> List String
+allSourcePaths jobs =
+    concatMap2 (\j -> append2 j.sources j.mids) jobs
+
+
+firstMissing : List String -> Runtime.Task x (Maybe String)
+firstMissing paths =
+    case paths of
+        [] ->
+            Task.succeed Nothing
+
+        p :: rest ->
+            Task.andThen
+                (\st ->
+                    if st.isFile then
+                        firstMissing rest
+
+                    else
+                        Task.succeed (Just p)
+                )
+                (Io.stat p)
 
 
 -- M4: read each job's ELM sources first (their texts are needed for the
