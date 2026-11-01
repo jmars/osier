@@ -99,7 +99,27 @@ start () =
             -- .ssa batch mode: drive the QBE backend (Mid.QbeModule.compileEntry)
             -- and write QBE IL per group.  `entry` is the defun key the
             -- lowering roots reachability from (run.js's QBE_ENTRY).
-            Task.andThen (runSsa entry) (Io.readFile path)
+            --
+            -- A MANIFEST PATH THAT IS NOT THERE IS A REFUSAL BY NAME, NOT A
+            -- VERDICT ABOUT THE MANIFEST'S CONTENTS.  `Io.readFile` maps a
+            -- failed open to "" (Rt.hostLeafReadFile's documented M6 arm), and
+            -- an absent manifest is then indistinguishable from an empty one:
+            -- MEASURED before this check, `--ssa M.main /tmp/d2a/nosuch-manifest.txt`
+            -- -> exit 0 in 0.004 s, stdout `"elmc: manifest has no groups"`,
+            -- elmc.err `err manifest has no groups` — a complaint about the
+            -- file's contents for a file that does not exist.  run.js throws
+            -- ENOENT at this same read, so the two lanes disagreed about
+            -- whether the run was even valid.  One STAT, before the read, and
+            -- the refusal names the path the caller typed.
+            Task.andThen
+                (\st ->
+                    if st.isFile then
+                        Task.andThen (runSsa entry) (Io.readFile path)
+
+                    else
+                        errLine ("manifest not found: " ++ path)
+                )
+                (Io.stat path)
 
         Ok _ ->
             errLine "usage: elmc --ssa <entry> <manifest>"
@@ -236,16 +256,44 @@ runSsa entryKey text =
             -- the same way; an `import X` whose `<dir>/X.mid` does not exist is
             -- NOT checked, because that is an Elm import, not a manifest entry
             -- (run.js's rule, mirrored in `resolveExisting`).
+            --
+            -- THE CORPUS ROOT IS A PREMISE OF EVERY COMPILE, SO AN ABSENT ONE
+            -- IS A REFUSAL BY NAME RATHER THAN A SILENT COMPILE OF NOTHING.
+            -- `corpusPaths` resolves the fixed corpus against `corpusRoot`
+            -- ("osier-compiler", CWD-relative — the same convention the
+            -- selfhost manifest's own source paths use, and the mirror of
+            -- run.js's process-CWD resolution), and each of those reads maps a
+            -- failed open to "" like every other read in this driver.  From a
+            -- CWD with no sibling `osier-compiler/` the WHOLE corpus therefore
+            -- compiled as empty text and the driver reported SUCCESS:
+            -- MEASURED, /tmp/d2b (a real source, a real manifest, no corpus)
+            -- -> exit 0 in 0.145 s, stdout `"elmc: wrote 1 outputs"`, no
+            -- elmc.err, and a 60-byte output reading `err parse error at row 1
+            -- column 1: expected keyword `module``.  Not one bad path but the
+            -- entire corpus missing, reported as a successful run — the worst
+            -- shape in this family.  The probe is a STAT of the corpus ROOT
+            -- (isDir) — the path the emitter already resolves — so a present
+            -- corpus refuses nothing and pays one syscall.  Checked BEFORE the
+            -- manifest's sources: when the corpus is gone those relative paths
+            -- are usually gone too, and the corpus is the cause, not a symptom.
             Task.andThen
-                (\missing ->
-                    case missing of
-                        Just path ->
-                            errLine ("source not found: " ++ path)
+                (\corpusStat ->
+                    if corpusStat.isDir then
+                        Task.andThen
+                            (\missing ->
+                                case missing of
+                                    Just path ->
+                                        errLine ("source not found: " ++ path)
 
-                        Nothing ->
-                            runSsaJobs entryKey jobs
+                                    Nothing ->
+                                        runSsaJobs entryKey jobs
+                            )
+                            (firstMissing (allSourcePaths jobs))
+
+                    else
+                        errLine ("corpus not found: " ++ corpusRoot)
                 )
-                (firstMissing (allSourcePaths jobs))
+                (Io.stat corpusRoot)
 
 
 runSsaJobs : String -> List Job -> Runtime.Task x String

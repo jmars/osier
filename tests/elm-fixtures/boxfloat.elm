@@ -1,4 +1,4 @@
-module Boxfloat exposing (boxadd, boxaddrev, boxbigsum)
+module Boxfloat exposing (boxadd, boxaddint, boxaddrev, boxbigsum)
 
 -- AREA 4 FOLLOW-UP — THE BOXED-INT x FLOAT READER PAIR (design doc
 -- AREA4-BOXING.md §4 recommendation 2 and the §6 "unpinned" risk).
@@ -39,8 +39,28 @@ module Boxfloat exposing (boxadd, boxaddrev, boxbigsum)
 -- INTEGER addition and never enter the float arm.  Every entry below keeps a
 -- real float operand so the float arm is the arm that runs.
 --
+-- THE SECOND READER PAIR — boxed + boxed INTEGER addition whose SUM RE-BOXES
+-- (`boxaddint`).  The float rows above pin the unbox; they say nothing about
+-- the OTHER end of the round trip.  Here both operands arrive as code-13
+-- cells, `Rt.+`'s INT arm unboxes both, and the sum is itself outside the i61
+-- fixnum range, so `mknum`'s one overflow check must take its failure branch
+-- and box the result a SECOND time.  Nothing else in the tree exercises the
+-- double round trip: the three float rows return a float (never re-boxed), and
+-- every `intbig` row's result is inside the fixnum range.
+--
+-- WHY EACH OPERAND BOXES, and why the SUM does too (arithmetic, not intent).
+-- The bound is EXCLUSIVE in magnitude: a fixnum is `-2^60 <= n < 2^60`.  So
+-- 1152921504606846976 (2^60) and 1152921504606846977 (2^60 + 1) are both the
+-- FIRST magnitude that does not fit — each is materialised through
+-- `Rt.boxInt`.  Their sum is 2305843009213693953 = 2^61 + 1: greater than
+-- 2^60, so it cannot be a fixnum either, and far below INT64_MAX
+-- (9223372036854775807), so it IS representable as an i64 and the boxed body
+-- holds the exact sum.  The +1 in the second operand is deliberate: it is the
+-- only bit below 2^60 in the answer, so a lost low limb, a truncated unbox or
+-- a one-operand unbox prints a different number instead of the same one.
+--
 -- The VAL arm is the oracle, as for every row in this gate: it never boxes, so
--- it reaches the same doubles by a different route.
+-- it reaches the same i64 by a different route.
 
 {-| 2^60 — the first value outside the i61 fixnum range, i.e. the smallest
 magnitude that BOXES.  Everything below is built on it.
@@ -78,3 +98,21 @@ the double it prints is the exact conversion of the boxed i64 plus 10^19.
 boxbigsum : Float
 boxbigsum =
     Basics.toFloat big + 1.0e19
+
+
+{-| 2^60 + 1 — the SECOND boxed operand. Outside the exclusive bound, so it
+boxes like `big`; the odd low bit is what makes the sum below discriminate a
+lost or truncated low limb.
+-}
+bigodd : Int
+bigodd =
+    1152921504606846977
+
+
+{-| (d) THE DOUBLE ROUND TRIP: boxed + boxed INTEGER addition whose sum
+(2^61 + 1) is itself outside the fixnum range, so `Rt.+`'s int arm unboxes
+BOTH operands through `payload(x, 0)` and `mknum` boxes the RESULT again.
+-}
+boxaddint : Int
+boxaddint =
+    big + bigodd

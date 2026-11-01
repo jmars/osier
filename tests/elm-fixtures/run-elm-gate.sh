@@ -887,7 +887,8 @@ intreject inttoobigparse 'parse error at row 16 column 5: integer literal `99999
 intreject inttoobig      'integer literal `9223372036854775808` is out of range: it is the magnitude of INT64_MIN'
 intreject inttoobighex   'integer literal `9223372036854775808` is out of range: it is the magnitude of INT64_MIN'
 
-# ============ AREA 4 FOLLOW-UP: the BOXED-INT x FLOAT reader pair ============
+# ========== AREA 4 FOLLOW-UP: the BOXED-INT reader pairs (x FLOAT, and
+# ========== BOXED+BOXED INTEGER whose sum re-boxes) ==========
 # The word arm BOXES an Int outside the i61 fixnum range into a code-13 heap
 # cell (`Rt.boxInt`), and `payload(x, 0)` is the unbox.  Every other reader of
 # a boxed value was pinned by a row; `Rt.+`'s FLOAT arm was not — and it is the
@@ -928,6 +929,45 @@ intreject inttoobighex   'integer literal `9223372036854775808` is out of range:
 intproc boxfloat boxadd    0 "1152921504606847000.0"   ""
 intproc boxfloat boxaddrev 0 "1152921504606847000.0"   ""
 intproc boxfloat boxbigsum 0 "11152921504606847000.0"  ""
+#
+# THE DOUBLE ROUND TRIP: boxed + boxed INTEGER addition whose SUM RE-BOXES
+# (`boxaddint`).  The three rows above pin the UNBOX; none of them says
+# anything about the other end of the round trip, because a float result is
+# never re-boxed.  Here both operands are code-13 cells, `Rt.+` takes its INT
+# arm, unboxes both through `payload(x, 0)`, adds, and the sum (2^61 + 1) is
+# itself outside the i61 fixnum range — so `mknum`'s one overflow check must
+# take its failure branch and box the result a SECOND time.
+#
+# WHY THE VALUES BOX (arithmetic, MEASURED in the emit): the fixnum bound is
+# `-2^60 <= n < 2^60`, EXCLUSIVE in magnitude, so 2^60 and 2^60+1 are both
+# outside it; the emitted `q_Boxfloat_x2ebig` / `q_Boxfloat_x2ebigodd` each
+# contain `call $q_Rt_x2eboxInt` and no `n * 8` shift.  The sum
+# 2305843009213693953 = 2^61 + 1 is greater than 2^60 (so it cannot be a
+# fixnum) and far below INT64_MAX (so the boxed body holds it exactly).  The
+# `+ 1` in the second operand is the only bit below 2^60 in the answer, so a
+# truncated unbox, a lost low limb or a one-operand unbox prints a different
+# number rather than the same one.
+#
+# BOTH ENDS ARE IN THE EMIT, which is why this row is not pinning something
+# adjacent: operand end = the two `q_Rt_x2eboxInt` calls above; result end =
+# inside `q_Rt_x2e_x2b`, the int arm's `@pfix_*`/`@pheap_*` unbox pair feeding
+# `add`, the `shl`/`sar`/`ceql` round-trip check, and `@fixbox_*`'s
+# `call $q_Rt_x2eboxInt`.
+#
+# THE VAL ARM IS THE ORACLE AND IT IS A GENUINELY DIFFERENT ROUTE: with
+# `QBE_VALREP=val` the same fixture emits ZERO `q_Rt_x2eboxInt` calls, the
+# literal is a plain i64 in a 40-byte Value's payload, and the add is inlined
+# as two payload loads and an `add`.  It prints the same number, so the two
+# arms agreeing is a differential, not a tautology.
+#
+# FAIL-ABILITY, MEASURED on /tmp copies of this row's own .ssa with the tree
+# untouched, one branch each: (1) RESULT end — make `@fixbox_*` fall through to
+# the fixnum store instead of calling the seat, and the row prints `1` (the
+# sum's low word shifted back down) at rc 0; (2) OPERAND end — store the
+# literal raw instead of calling `Rt.boxInt`, and it prints 1297036692682702849
+# at rc 0.  Both are SILENT wrong answers with rc 0, which is the signature
+# this row exists to catch.
+intproc boxfloat boxaddint 0 "2305843009213693953" ""
 
 # ==================== L1: the `^` operator ====================
 # `^` was already in the parser (Elm's precedence 8, right-associative); what did
