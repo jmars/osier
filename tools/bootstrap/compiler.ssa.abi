@@ -3,11 +3,11 @@
 # Written by tools/qbe/abi-fingerprint.sh --write; the components are
 # digests of DECLARATIONS (comments/whitespace stripped), so a comment
 # edit in a declaration does NOT move the marker.
-seed-bytes=38148638
-seed-sha256=a564a31eb20fa93243264e3d7f05b1086534567e87eb7acb10897d3c699c21ae
+seed-bytes=38136379
+seed-sha256=4f5ec19e81da015e910fac24592c88fb5fc2eccbe6b75437fbee98aa8f3324cf
 abi-marker=bb739cd1e058dc05d6fe40c37ecfa84cd9c74c2a90022a377fec22fd849a443a
 abi-rt-exports=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
 abi-rt-callN=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
 abi-rt-types=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
 abi-gc-layout=e03c508c8d6cdb1ba9f74173e68dbf063067213e71383e657467c62cfb236541
-emit-inputs=c0915d9a9b89cc04704a5f57cf15f05d56c4b4e3a5a840f75cb83835b4b0de6e
+emit-inputs=94f932f20133ead0aa0a939f1b376508eed22c9c95e6b3266e4bc2d60faf0a26
