@@ -969,6 +969,36 @@ intproc boxfloat boxbigsum 0 "11152921504606847000.0"  ""
 # this row exists to catch.
 intproc boxfloat boxaddint 0 "2305843009213693953" ""
 
+# THE NEGATIVE POLARITY OF THE SAME RE-BOX (`boxnegint`): (-2^60) + (-2^60)
+# = -2^61 = -2305843009213693952.  The row above pins the re-boxing seat with a
+# POSITIVE sum; nothing pinned its negative side — the direction the `shl`
+# round-trip check overflows in, and the sign arm of whatever prints a boxed
+# body.
+#
+# THE OPERANDS HERE ARE FIXNUMS, and that is the MEASURED point, not a
+# simplification.  The bound is EXCLUSIVE IN MAGNITUDE but ASYMMETRIC IN
+# SIGN — a fixnum is `-2^60 <= n < 2^60` — so `+2^60` does not fit (2^60 << 3
+# overflows) while `-2^60` DOES (-2^60 << 3 is exactly INT64_MIN and
+# sar-round-trips).  The emitted `q_Boxfloat_x2ebigneg` therefore builds the
+# i64 from limbs and ends `shl %t4, 3` with NO `call $q_Rt_x2eboxInt`, unlike
+# `big`/`bigodd` above.  So this row is the OPERAND-is-fixnum shape feeding the
+# same result-end seat: `Rt.+`'s int arm takes `@pfix_*` on both sides (`sar
+# %t62, 3`), adds to -2^61, the `shl`/`sar`/`ceql` round trip fails in the
+# negative direction, and `@fixbox_*` calls `Rt.boxInt` on a NEGATIVE body.
+# Both shapes of the seat are now pinned; neither row subsumes the other.
+#
+# THE VAL ARM IS THE ORACLE, as for every row here, and the differential is
+# sharper than usual: with `QBE_VALREP=val` the same fixture emits ZERO
+# `q_Rt_x2eboxInt` calls, `bigneg` is a plain i64 in a 40-byte Value's payload
+# (`storel %t5, %t0`), and the add is inlined as two payload loads and an
+# `add`.  It prints the same -2305843009213693952.
+#
+# FAIL-ABILITY: the row is red-able by one character — flipping the leading
+# `-` in the expectation reds it with the printed value in the diff (MEASURED,
+# see the unit's record) — and the seat it names is the one the row above
+# already reds at rc 0 by falling through `@fixbox_*`.
+intproc boxfloat boxnegint 0 "-2305843009213693952" ""
+
 # ==================== L1: the `^` operator ====================
 # `^` was already in the parser (Elm's precedence 8, right-associative); what did
 # not exist was a checker row, a lowering row and a runtime prim, so every `^`

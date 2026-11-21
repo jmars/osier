@@ -1,4 +1,4 @@
-module Boxfloat exposing (boxadd, boxaddint, boxaddrev, boxbigsum)
+module Boxfloat exposing (boxadd, boxaddint, boxaddrev, boxbigsum, boxnegint)
 
 -- AREA 4 FOLLOW-UP — THE BOXED-INT x FLOAT READER PAIR (design doc
 -- AREA4-BOXING.md §4 recommendation 2 and the §6 "unpinned" risk).
@@ -116,3 +116,25 @@ BOTH operands through `payload(x, 0)` and `mknum` boxes the RESULT again.
 boxaddint : Int
 boxaddint =
     big + bigodd
+
+
+{-| -2^60 — the NEGATIVE end of the same bound.  The bound is EXCLUSIVE IN
+MAGNITUDE (`-limit <= n < limit`, `Mid/RtLayout.wordFixnumLimit`), so unlike
+its positive twin `big` this value IS a fixnum: `-2^60 << 3` is exactly
+INT64_MIN and sar-round-trips.  MEASURED in the emit: `q_Boxfloat_x2ebigneg`
+stores `n * 8` built from limbs and shifted at runtime, with NO
+`call $q_Rt_x2eboxInt`.
+-}
+bigneg : Int
+bigneg =
+    -1152921504606846976
+
+
+{-| (e) THE NEGATIVE RE-BOX: fixnum + fixnum whose sum (-2^61) is outside the
+i61 range on the NEGATIVE side, so `Rt.+`'s int arm adds two tagged immediates,
+the `shl`/`sar`/`ceql` round trip fails in the other direction, and `mknum`
+boxes the result a second time with a NEGATIVE body.
+-}
+boxnegint : Int
+boxnegint =
+    bigneg + bigneg
