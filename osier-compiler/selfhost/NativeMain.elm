@@ -342,6 +342,13 @@ readCorpus =
     seqMap (List.map Io.readFile corpusPaths)
 
 
+-- The runtime surface file, resolved against the SAME anchor as the corpus
+-- paths; `ssaJobs` STATs it before reading it (see the guard there).
+rtMidPath : String
+rtMidPath =
+    corpusRoot ++ "/runtime.mid"
+
+
 corpusPaths : List String
 corpusPaths =
     List.map (\p -> corpusRoot ++ "/" ++ p)
@@ -371,11 +378,51 @@ regroupElm jobs elmTexts =
 
 ssaJobs : String -> List Job -> List String -> Runtime.Task x String
 ssaJobs entryKey jobs elmTexts =
+    -- AN ABSENT runtime.mid IS A REFUSAL BY NAME, NOT AN EMPTY RUNTIME.
+    -- `Io.readFile` maps a failed open to "" (Rt.hostLeafReadFile's documented
+    -- M6 arm), and "" is a VALID runtime.mid with no defuns: `Rt.loadArm`
+    -- parses it to an empty module and answers Ok.  So with the file absent the
+    -- driver compiled every group against a runtime that has no seats at all
+    -- and then reported SUCCESS.  MEASURED before this check, from a CWD whose
+    -- `osier-compiler/` holds src/ and core-libs/ (a real, readable corpus)
+    -- but no runtime.mid: exit 0 in 31.8 s, stdout `"elmc: wrote 1 outputs"`,
+    -- stderr empty, NO elmc.err, and a 106-byte output reading `err qbe:
+    -- rawCall to Rt.@p.surface-seat — not a defun of this program` — the
+    -- CORE's complaint about the missing runtime, never the missing FILE, with
+    -- `wrote 1 outputs` on top of it.  run.js (the twin this driver must
+    -- match) throws ENOENT at this same read, so the two lanes disagreed about
+    -- whether the run was even valid.  The probe is a STAT of the very path
+    -- the read uses (`rtMidPath`), so a present runtime.mid refuses nothing
+    -- and pays one syscall.
+    --
+    -- THE GUARD WRAPS THE WHOLE TASK, AND THAT IS NOT COSMETIC: `errLine`
+    -- returns the model STRING (`"elmc: ..."`), and every stage below consumes
+    -- a String as TEXT — the runtime source, the corpus, a group's Elm.  A
+    -- refusal returned from INSIDE the pipeline is therefore handed to the next
+    -- consumer as input: MEASURED with this guard placed on the runtime READ
+    -- instead, the refusal text became the runtime source and the run ended
+    -- `-- SYNTAX PROBLEM ... runtime.mid:1:1 ... 1| elmc: runtime.mid not
+    -- found: ...` — the refusal still written to elmc.err, but the group
+    -- compiled anyway.  At the head of `ssaJobs` the String is `runSsa`'s
+    -- return value, i.e. the final model, which is what `errLine` is for.
+    Task.andThen
+        (\st ->
+            if st.isFile then
+                ssaJobsCorpus entryKey jobs elmTexts
+
+            else
+                errLine ("runtime.mid not found: " ++ rtMidPath)
+        )
+        (Io.stat rtMidPath)
+
+
+ssaJobsCorpus : String -> List Job -> List String -> Runtime.Task x String
+ssaJobsCorpus entryKey jobs elmTexts =
     readCorpus
         |> Task.andThen
             (\corpus ->
                 -- M1: read the runtime surface file ONCE (the SAME anchor the
-                -- corpus paths use, `corpusRoot ++ "/runtime.mid"`), load it
+                -- corpus paths use, `rtMidPath`), load it
                 -- once, and thread the record to every group — the
                 -- once-per-process hoist, so the surface parse never becomes
                 -- per-compileEntry-call.
@@ -425,7 +472,7 @@ ssaJobs entryKey jobs elmTexts =
                                                 []
                                         )
                     )
-                    (Io.readFile (corpusRoot ++ "/runtime.mid"))
+                    (Io.readFile rtMidPath)
             )
 
 
