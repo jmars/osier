@@ -452,25 +452,60 @@ ssaJobsCorpus entryKey jobs elmTexts =
                                 errLine ("runtime.mid: " ++ msg)
 
                             Ok rt ->
-                                let
-                                    elmGroups =
-                                        regroupElm jobs elmTexts
-                                in
-                                -- M4: resolve each job's `.mid` IMPORTS (reader-side,
-                                -- relative to the importing file), then read them plus
-                                -- the explicit mids, then compile each job.
-                                resolveJobs jobs elmGroups
-                                    |> Task.andThen
-                                        (\midResults ->
-                                            writeBundles
-                                                (zipJobs jobs
-                                                    (zipWith (renderJob rt corpus entryKey)
-                                                        (zipWith (\job elmGroup -> ( job, elmGroup )) jobs elmGroups)
-                                                        midResults
-                                                    )
+                                -- A runtime.mid THAT IS THERE BUT LOADS WITH NO
+                                -- DEFUNS IS A REFUSAL TOO — the stat guard above
+                                -- cannot see it, because the FILE exists.  The
+                                -- empty text and a comments-only file both parse
+                                -- to a module with no surface defuns, `loadArm`
+                                -- answers Ok, and every group then compiles
+                                -- against a runtime with no seats and reports
+                                -- SUCCESS: MEASURED with the pre-guard tree
+                                -- binary, BOTH variants from a complete corpus ->
+                                -- exit 0 in 31.0 s / 32.0 s, stdout `"elmc: wrote
+                                -- 1 outputs"`, stderr empty, NO elmc.err, and a
+                                -- 115-byte output reading `err qbe: rawCall to
+                                -- Rt.allocVector.surface-seat — not a defun of this
+                                -- program (word-level C seats are rawCallRaw)` —
+                                -- the CORE's complaint about one seat, never the
+                                -- fact that the runtime has none at all.
+                                --
+                                -- PLACED HERE, IN THE LOAD'S `Ok` ARM, BECAUSE THIS
+                                -- IS THE FINAL-MODEL SEAT (the same reason the
+                                -- absent-runtime guard heads `ssaJobs`): `errLine`
+                                -- returns the model STRING, and any stage that
+                                -- PRODUCES text for a later stage would hand the
+                                -- refusal to that consumer as input — the
+                                -- measured failure mode of the first placement of
+                                -- the guard above, where the refusal became the
+                                -- runtime SOURCE and the group compiled anyway.
+                                -- `parsedSource` is `Ok ast` on every loaded
+                                -- runtime (`loadText` builds it that way) and `ast`
+                                -- is exactly the surface defun list, so `Ok []` is
+                                -- "loaded, zero defuns" and not a guess.
+                                case rt.parsedSource of
+                                    Ok [] ->
+                                        errLine ("runtime.mid has no defuns: " ++ rtMidPath)
+
+                                    _ ->
+                                        let
+                                            elmGroups =
+                                                regroupElm jobs elmTexts
+                                        in
+                                        -- M4: resolve each job's `.mid` IMPORTS (reader-side,
+                                        -- relative to the importing file), then read them plus
+                                        -- the explicit mids, then compile each job.
+                                        resolveJobs jobs elmGroups
+                                            |> Task.andThen
+                                                (\midResults ->
+                                                    writeBundles
+                                                        (zipJobs jobs
+                                                            (zipWith (renderJob rt corpus entryKey)
+                                                                (zipWith (\job elmGroup -> ( job, elmGroup )) jobs elmGroups)
+                                                                midResults
+                                                            )
+                                                        )
+                                                        []
                                                 )
-                                                []
-                                        )
                     )
                     (Io.readFile rtMidPath)
             )

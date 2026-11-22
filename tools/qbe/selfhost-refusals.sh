@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# selfhost-refusals.sh — pin the selfhost driver's four MANIFEST/CORPUS refusals.
+# selfhost-refusals.sh — pin the selfhost driver's five MANIFEST/CORPUS refusals.
 #
 #   tools/qbe/selfhost-refusals.sh
 #
@@ -21,6 +21,13 @@
 #                            (an empty runtime.mid parses as a valid runtime
 #                            with no defuns, so `Rt.loadArm` answers Ok)
 #   4. missing manifest src  was `wrote 1 outputs` + the same 60-byte parse error
+#   5. runtime.mid EMPTY     was `wrote 1 outputs` + a 115-byte output holding
+#                            `err qbe: rawCall to Rt.allocVector.surface-seat`,
+#                            in 31.0 s, with NO elmc.err — the file IS there, so
+#                            the stat guard cannot catch it: "" and a
+#                            comments-only file both parse to a module with ZERO
+#                            defuns and `Rt.loadArm` answers Ok, so every group
+#                            compiled against a runtime with no seats at all
 #
 # The stat-before-read guards in NativeMain.elm are what turn each into a
 # refusal BY NAME, and this script is the pin that goes red if a guard is
@@ -31,22 +38,24 @@
 # WHAT IT DOES.  Builds the driver FROM THIS TREE (the chain
 # tools/qbe-bootstrap.sh --freeze uses: jq-patched selfhost manifest ->
 # RUN_STACK_KB=131072 node osier-compiler/run.js --batch -> vendor/qbe/qbe ->
-# cc -lc) and then runs four scenarios, each from its own throwaway CWD:
+# cc -lc) and then runs five scenarios, each from its own throwaway CWD:
 #
 #   1. missing manifest      -- the manifest path does not exist
 #   2. no corpus root        -- the CWD has no ./osier-compiler/
 #   3. runtime.mid absent    -- ./osier-compiler/ holds the corpus, not runtime.mid
 #   4. missing manifest src  -- corpus complete, the manifest names a file that
 #                              is not there
+#   5. runtime.mid empty     -- corpus complete, runtime.mid present but 0 bytes
 #
 # For each it asserts: the exact refusal line on STDOUT, the exact `err <msg>`
 # in ./elmc.err, EMPTY stderr, exit 0 (the documented contract), and that the
 # group's output .ssa was NOT written.
 #
 # Everything it creates lives under one mktemp -d (removed on exit); it writes
-# nothing into the repo except itself.  Scenario 3 needs a real corpus beside
-# the missing runtime.mid, so it links the tree's src/ and core-libs/ and copies
-# runtime.mid where the scenario needs one present.
+# nothing into the repo except itself.  Scenarios 3-5 need a real corpus beside
+# the runtime.mid under test, so they link the tree's src/ and core-libs/ and
+# copy runtime.mid where the scenario needs one present, truncate it where the
+# scenario needs it empty.
 #
 # Env:   TMPDIR (artifacts), RUN_STACK_KB (default 131072, as qbe-bootstrap.sh).
 # Usage: tools/qbe/selfhost-refusals.sh
@@ -110,15 +119,21 @@ expect() { # <label> <want> <got>
 }
 
 # A corpus root that is PRESENT and readable, minus runtime.mid (and minus
-# runtime.mid's absence when the scenario needs it present).
-corpus_root() { # <dir> [with-runtime]
+# runtime.mid's absence when the scenario needs it present — or EMPTY, which is
+# the one absence a stat cannot see).
+corpus_root() { # <dir> [with-runtime|empty-runtime]
   mkdir -p "$1/osier-compiler" || die "mkdir $1/osier-compiler"
   ln -s "$ROOT/osier-compiler/src"       "$1/osier-compiler/src"
   ln -s "$ROOT/osier-compiler/core-libs" "$1/osier-compiler/core-libs"
-  if [ "${2:-}" = with-runtime ]; then
-    cp "$ROOT/osier-compiler/runtime.mid" "$1/osier-compiler/runtime.mid" \
-      || die "cp runtime.mid into $1"
-  fi
+  case "${2:-}" in
+    with-runtime)
+      cp "$ROOT/osier-compiler/runtime.mid" "$1/osier-compiler/runtime.mid" \
+        || die "cp runtime.mid into $1"
+      ;;
+    empty-runtime)
+      : > "$1/osier-compiler/runtime.mid" || die "truncate runtime.mid in $1"
+      ;;
+  esac
 }
 
 scenario() { # <label> <dir> <manifest> <output> <expected message, no prefix>
@@ -168,6 +183,14 @@ D="$W/c4"; corpus_root "$D" with-runtime
 printf '%s\n' "$D/nosuchfile.elm" "-> $D/out.ssa" > "$D/manifest.txt"
 scenario "missing manifest source" "$D" "$D/manifest.txt" "$D/out.ssa" \
          "source not found: $D/nosuchfile.elm"
+
+# 5. the corpus is complete and runtime.mid is PRESENT but EMPTY — the one
+#    absence the stat guard above cannot see (the file is there), and the one
+#    the load itself must catch: zero defuns is a valid parse, not an error.
+D="$W/c5"; corpus_root "$D" empty-runtime
+printf '%s\n' "$ROOT/tools/qbe/word-arm-diff/int7.elm" "-> $D/out.ssa" > "$D/manifest.txt"
+scenario "runtime.mid empty" "$D" "$D/manifest.txt" "$D/out.ssa" \
+         "runtime.mid has no defuns: osier-compiler/runtime.mid"
 
 # ---------------------------------------------------------------- verdict ----
 printf 'selfhost refusals: PASS=%d FAIL=%d\n' "$PASS" "$FAIL"

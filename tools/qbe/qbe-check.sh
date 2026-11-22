@@ -3638,4 +3638,33 @@ else
   echo "PASS native-driver-arm: the self-hosted driver loads the runtime through the SAME arm its flags emit (Rt.loadArm True)"
 fi
 
+# ---- THE SELFHOST DRIVER'S MANIFEST/CORPUS REFUSALS (refusalpin + emptyrt) ----
+# The five refusals this row pins are ONE class — a read that maps a failed open
+# to "" compiles empty text and reports `wrote N outputs` — and this driver's
+# only ORACLE for them is a built binary: it is in the self-host manifest and NOT in
+# Elm's build graph, so `elm make` never type-checks it and a text grep of the
+# guards would pass with a guard dead (MEASURED: with the runtime.mid stat guard
+# deleted, a grep-based pin stays green while the binary silently "succeeds").
+# tools/qbe/selfhost-refusals.sh therefore BUILDS the driver from this tree
+# (~48 s: 33 s node emit + 11 s qbe + 2 s cc) and runs five scenarios from
+# throwaway CWDs, asserting the exact stdout line, the exact `err <msg>` in
+# ./elmc.err, empty stderr, exit 0 (the documented contract) and NO output file:
+# missing manifest, no corpus root, runtime.mid absent, missing manifest source,
+# and runtime.mid PRESENT BUT EMPTY (the one the stat cannot see — "" and a
+# comments-only file both load as a runtime with zero defuns, which was a silent
+# `wrote 1 outputs` over a 115-byte garbage .ssa until the load's no-defuns
+# refusal).  MEASURED cost: 48 s green, 80 s when it goes red.
+if [ -x "$ROOT/tools/qbe/selfhost-refusals.sh" ]; then
+  if refusals_out="$(TMPDIR="$TMP" "$ROOT/tools/qbe/selfhost-refusals.sh" 2>&1)"; then
+    echo "PASS selfhost-refusals: $(printf '%s\n' "$refusals_out" | grep -c '^PASS ') assertion(s) — the built driver refuses all five manifest/corpus failures BY NAME (missing manifest, no corpus root, runtime.mid absent, missing manifest source, runtime.mid with zero defuns), each with elmc.err written, stderr empty, and no output file"
+  else
+    echo "FAIL selfhost-refusals: the selfhost driver's manifest/corpus refusals regressed (a refusal went silent again, or the no-defuns guard is gone)"
+    printf '%s\n' "$refusals_out" | sed 's/^/    /'
+    FAIL=1
+  fi
+else
+  echo "FAIL selfhost-refusals: tools/qbe/selfhost-refusals.sh is missing or not executable — the ONLY oracle that runs the selfhost driver's refusals was deleted"
+  FAIL=1
+fi
+
 exit $FAIL
