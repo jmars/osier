@@ -74,6 +74,15 @@ module Prelude exposing
     , basicsToFloat
     , basicsIsNaN
     , stringToFloat
+    , stringIsEmpty
+    , stringUncons
+    , parserChompBase10
+    , parserConsumeBase
+    , parserConsumeBase16
+    , parserIsAsciiCode
+    , parserIsSubChar
+    , parserIsSubString
+    , parserFindSubString
     )
 
 -- The M3 prelude: a pure-core Elm module compiled BY the compiler itself at
@@ -1400,3 +1409,249 @@ basicsToFloat n =
 basicsIsNaN : Float -> Bool
 basicsIsNaN f =
     False
+
+
+-- ==================== elm/parser's Elm.Kernel.Parser ====================
+--
+-- WHY THIS IS ELM AND NOT MID-C, stated before the code because it is a
+-- deliberate departure from "swap the elm-lang JS kernels to Mid-C".
+--
+-- MEASURED FIRST: this tree has NO Elm.Kernel precedent at all — zero
+-- `Elm.Kernel` mentions in osier-compiler/src or osier-compiler/runtime.mid —
+-- so there is no C-seat convention to follow.  `import Elm.Kernel.Parser` in a
+-- package source is an import the compiler never validates, and
+-- `Elm.Kernel.Parser.f` is a DOTTED token the alias table rewrites.  That IS the
+-- minimal seat: one alias row per function (Lower.Resolve.preludeTable) pointing
+-- at a Prelude body.
+--
+-- WHY NOT A Mid-C DEFUN IN runtime.mid, function by function:
+--   * isSubChar takes an ELM CLOSURE.  A Mid defun applying a closure needs the
+--     val/word-arm call machinery (rt_call0..16 + Rt.apply), and `Rt.apply`'s
+--     own body is `>>> QBE_VAL-ONLY`: there is no arm-neutral closure call a
+--     runtime defun can make.  This is the hard one.
+--   * isSubString/findSubString/consumeBase/consumeBase16 return TUPLES, so a Mid
+--     defun would have to allocate cons cells itself: `Rt.cons` has FOUR arm-split
+--     definitions in runtime.mid (val/word x young/old) — the exact allocation
+--     region another lane is rewriting right now.
+--   * runtime.mid is the shared file the native-frames lane is live in.
+-- The two scalar ones (chompBase10, isAsciiCode) WOULD be cheap Mid-C seats; they
+-- are here so the kernel has ONE home and one set of semantics.  IF the parser
+-- becomes hot, that split is its own unit with its own probe — not this one.
+--
+-- SEMANTICS.  The only kernel spec in the corpus is the doc text in
+-- Parser/Advanced.elm (the package's Elm/Kernel/Parser.js is NOT in the fetched
+-- sources), and the byte-string model forces these deviations, ALL documented on
+-- the functions below:
+--   1. A Char is ONE BYTE, exactly like `Prelude.charToCode` (first byte) and
+--      `stringToList`/`charFromCode` already model it.  Offsets are byte offsets.
+--      Real Elm's UTF-16 code units (1 or 2) become 1 byte; a multi-byte UTF-8
+--      character is several Chars, as it already is for String.toList here.
+--   2. Columns count BYTES, where real Elm counts UTF-16 code units.  They agree
+--      on all ASCII input, which is what every elm/parser consumer feeds it.
+--   3. `findSubString` on failure returns the row/col reached at the END of the
+--      source, which is the shape Parse.Advanced's `chompUntilEndOr` documents:
+--      `findSubString "42" 7 1 18 "Is 42 the answer?" == (-1, 1, 18)`.
+
+
+-- elm/core String.isEmpty.  It needs its own function: the bare `isEmpty` in
+-- scope is the LIST one, so `String.isEmpty` had no dotted row at all.
+stringIsEmpty : String -> Bool
+stringIsEmpty s =
+    String.length s == 0
+
+
+-- elm/core String.uncons: the first Char (one byte, deviation 1) and the rest.
+stringUncons : String -> Maybe ( Char, String )
+stringUncons s =
+    let
+        n =
+            String.length s
+    in
+    if n == 0 then
+        Nothing
+
+    else
+        Just ( charFromCode (charCode s 0), stringSlice 1 n s )
+
+
+parserIsDigitByte : Int -> Bool
+parserIsDigitByte b =
+    48 <= b && b <= 57
+
+
+parserHexValue : Int -> Int
+parserHexValue b =
+    if 48 <= b && b <= 57 then
+        b - 48
+
+    else if 97 <= b && b <= 102 then
+        b - 87
+
+    else if 65 <= b && b <= 70 then
+        b - 55
+
+    else
+        -1
+
+
+-- The new offset after chomping decimal digits from `offset`: the first
+-- non-digit, or the end, so the result is >= the argument.
+parserChompBase10 : Int -> String -> Int
+parserChompBase10 offset src =
+    if parserIsDigitByte (charCode src offset) then
+        parserChompBase10 (offset + 1) src
+
+    else
+        offset
+
+
+-- (endOffset, value) after chomping digits that are valid in `base` (2..10).
+-- No digit consumed gives (offset, 0), which is exactly what `finalizeInt`
+-- tests for before it reports `invalid`.
+parserConsumeBase : Int -> Int -> String -> ( Int, Int )
+parserConsumeBase base offset src =
+    parserConsumeBaseHelp base offset src offset 0
+
+
+parserConsumeBaseHelp : Int -> Int -> String -> Int -> Int -> ( Int, Int )
+parserConsumeBaseHelp base offset src end n =
+    let
+        b =
+            charCode src offset
+
+        v =
+            b - 48
+    in
+    if parserIsDigitByte b && v < base then
+        parserConsumeBaseHelp base (offset + 1) src (offset + 1) (n * base + v)
+
+    else
+        ( end, n )
+
+
+-- (endOffset, value) after chomping hex digits, both cases (`0xFF`, `0xff`).
+parserConsumeBase16 : Int -> String -> ( Int, Int )
+parserConsumeBase16 offset src =
+    parserConsumeBase16Help offset src offset 0
+
+
+parserConsumeBase16Help : Int -> String -> Int -> Int -> ( Int, Int )
+parserConsumeBase16Help offset src end n =
+    let
+        v =
+            parserHexValue (charCode src offset)
+    in
+    if v >= 0 then
+        parserConsumeBase16Help (offset + 1) src (offset + 1) (n * 16 + v)
+
+    else
+        ( end, n )
+
+
+-- Is the byte at `offset` the ASCII code `code`?  Out of bounds reads -1, which
+-- no caller passes, so the end of the string is False.
+parserIsAsciiCode : Int -> Int -> String -> Bool
+parserIsAsciiCode code offset src =
+    charCode src offset == code
+
+
+-- Apply the predicate to the Char at `offset` (one byte, deviation 1):
+--   -1  past the end, or the predicate said no
+--   -2  the predicate said yes and the byte is a newline (`\n`)
+--    n  the predicate said yes; n is the offset AFTER the Char
+parserIsSubChar : (Char -> Bool) -> Int -> String -> Int
+parserIsSubChar isGood offset src =
+    let
+        b =
+            charCode src offset
+    in
+    if b < 0 then
+        -1
+
+    else if isGood (charFromCode b) then
+        if b == 10 then
+            -2
+
+        else
+            offset + 1
+
+    else
+        -1
+
+
+-- Advance (row, col) over the byte range [i, end): a newline starts a new row at
+-- column 1, every other byte is one column (deviation 2).
+parserWalk : Int -> Int -> Int -> Int -> String -> ( Int, Int )
+parserWalk i end row col src =
+    if i >= end then
+        ( row, col )
+
+    else if charCode src i == 10 then
+        parserWalk (i + 1) end (row + 1) 1 src
+
+    else
+        parserWalk (i + 1) end row (col + 1) src
+
+
+parserMatchesAt : String -> Int -> String -> Int -> Int -> Bool
+parserMatchesAt sub offset src i n =
+    if i >= n then
+        True
+
+    else if charCode src (offset + i) == charCode sub i then
+        parserMatchesAt sub offset src (i + 1) n
+
+    else
+        False
+
+
+-- Is `sub` at `offset`?  Success: the new offset is offset + length sub and the
+-- row/col advance over the matched bytes.  Failure: -1 and the row/col unchanged
+-- (both callers pass the state's own row/col to `fromState`, so nothing reads
+-- them there).
+parserIsSubString : String -> Int -> Int -> Int -> String -> ( Int, Int, Int )
+parserIsSubString sub offset row col src =
+    let
+        n =
+            String.length sub
+    in
+    if parserMatchesAt sub offset src 0 n then
+        let
+            ( r2, c2 ) =
+                parserWalk offset (offset + n) row col src
+        in
+        ( offset + n, r2, c2 )
+
+    else
+        ( -1, row, col )
+
+
+-- The first offset at or after `offset` where `sub` fits.  Failure: -1 and the
+-- row/col advanced to the END of src (deviation 3).
+parserFindSubString : String -> Int -> Int -> Int -> String -> ( Int, Int, Int )
+parserFindSubString sub offset row col src =
+    parserFindHelp sub (String.length sub) offset (String.length src - String.length sub) row col src
+
+
+parserFindHelp : String -> Int -> Int -> Int -> Int -> Int -> String -> ( Int, Int, Int )
+parserFindHelp sub n i end row col src =
+    if i > end then
+        let
+            ( r2, c2 ) =
+                parserWalk i (String.length src) row col src
+        in
+        ( -1, r2, c2 )
+
+    else if parserMatchesAt sub i src 0 n then
+        let
+            ( r2, c2 ) =
+                parserWalk i (i + n) row col src
+        in
+        ( i + n, r2, c2 )
+
+    else
+        let
+            ( r3, c3 ) =
+                parserWalk i (i + 1) row col src
+        in
+        parserFindHelp sub n (i + 1) end r3 c3 src

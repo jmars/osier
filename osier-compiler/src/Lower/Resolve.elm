@@ -1,5 +1,6 @@
 module Lower.Resolve exposing
     ( aliasTableFor
+    , infixAliases
     , checkAmbiguousImports
     , checkImportShadowing
     , exportedNames
@@ -31,6 +32,7 @@ module Lower.Resolve exposing
 -- the Platform.* conveniences (dotted) + the stream/vector/process/compare prim
 -- bare aliases follow.
 
+import Elm.Syntax.Declaration as Declaration
 import Elm.Syntax.Exposing as Exposing exposing (Exposing(..))
 import Elm.Syntax.Import as Import
 import Elm.Syntax.Module as SyntaxModule
@@ -43,9 +45,10 @@ preludeModuleName =
     [ "Prelude" ]
 
 
-aliasTableFor : List String -> List String -> List (Node Import.Import) -> List ( String, String )
-aliasTableFor modName exported imports =
+aliasTableFor : List String -> List String -> List (Node Declaration.Declaration) -> List (Node Import.Import) -> List ( String, String )
+aliasTableFor modName exported decls imports =
     selfAliases modName exported
+        ++ infixAliases modName decls
         ++ importAliases imports
         ++ preludeAliasesFor modName
         ++ primDotAliases
@@ -59,6 +62,40 @@ aliasTableFor modName exported imports =
 selfAliases : List String -> List String -> List ( String, String )
 selfAliases modName exported =
     List.map (\n -> ( n, qualify modName n )) exported
+
+
+-- INFIX DECLARATIONS: `infix left 5 (|=) = keeper` makes `a |= b` mean
+-- `keeper a b` in THIS module.  The declaration has no body to lower, so the
+-- whole of it is one alias row of the shape `import X exposing (name)` already
+-- produces — which is what makes BOTH passes agree for free: Lower.Expr tries
+-- the row for a dotted/bare token, Type.Infer resolves an operator through the
+-- same table, and FromAst emits the App the row names.
+--
+-- What is NOT read here, deliberately: the DECLARED precedence/associativity.
+-- The expression parser carries a FIXED table (src/Elm/Parser/Expression.elm)
+-- whose rows already include elm/parser's own `|=` 5 left and `|.` 6 left, so a
+-- package that declares the standard precedence gets the standard parse.  A
+-- package declaring a precedence the table does not hold parses at the built-in
+-- one; that is a parser-level limitation, visible here rather than silent.
+--
+-- CROSS-MODULE operators are NOT resolved: `import Parser.Advanced exposing
+-- ((|=))` yields no row (InfixExpose is skipped), because the row would have to
+-- name the DEFINING module's implementation function and that module's infix
+-- declarations are not in scope.  Parser.elm declares its own two, so the slice
+-- lands without it.
+infixAliases : List String -> List (Node Declaration.Declaration) -> List ( String, String )
+infixAliases modName decls =
+    List.filterMap (infixAlias modName) decls
+
+
+infixAlias : List String -> Node Declaration.Declaration -> Maybe ( String, String )
+infixAlias modName (Node _ decl) =
+    case decl of
+        Declaration.InfixDeclaration infixDecl ->
+            Just ( Node.value infixDecl.operator, qualify modName (Node.value infixDecl.function) )
+
+        _ ->
+            Nothing
 
 
 preludeAliasesFor : List String -> List ( String, String )
@@ -89,6 +126,11 @@ preludeTable =
     , ( "ge", "Prelude.ge" )
     , ( "eq", "Prelude.eq" )
     , ( "neq", "Prelude.neq" )
+
+    -- Basics' Int->Float widening as a BARE name (elm/parser's `float` uses it
+    -- as a value: `{ int = Ok toFloat, ... }`).  Only the dotted
+    -- `Basics.toFloat` row existed, and a bare name is not the dotted one.
+    , ( "toFloat", "Prelude.basicsToFloat" )
 
     -- Maybe / Result constructors + conveniences
     , ( "Just", "Prelude.Just" )
@@ -174,6 +216,26 @@ preludeTable =
             , ( "Char.isOctDigit", "charIsOctDigit" )
             , ( "Char.isHexDigit", "charIsHexDigit" )
             , ( "Char.isAlphaNum", "charIsAlphaNum" )
+
+            -- elm/core String members the elm/parser slice needed (the bare
+            -- `isEmpty` in scope is the LIST one, so the dotted form is a row).
+            , ( "String.isEmpty", "stringIsEmpty" )
+            , ( "String.uncons", "stringUncons" )
+
+            -- THE KERNEL SEAT: `import Elm.Kernel.Parser` in a package source is
+            -- an import this compiler never validates (there is no Elm.Kernel
+            -- machinery at all — MEASURED: zero mentions in src/ and in
+            -- runtime.mid), and every call is a DOTTED token.  These seven rows
+            -- ARE the seat; the bodies are in Prelude.elm, which states why they
+            -- are Elm and not Mid-C (closure argument, tuple results, and
+            -- runtime.mid being another lane's file).
+            , ( "Elm.Kernel.Parser.chompBase10", "parserChompBase10" )
+            , ( "Elm.Kernel.Parser.consumeBase", "parserConsumeBase" )
+            , ( "Elm.Kernel.Parser.consumeBase16", "parserConsumeBase16" )
+            , ( "Elm.Kernel.Parser.isAsciiCode", "parserIsAsciiCode" )
+            , ( "Elm.Kernel.Parser.isSubChar", "parserIsSubChar" )
+            , ( "Elm.Kernel.Parser.isSubString", "parserIsSubString" )
+            , ( "Elm.Kernel.Parser.findSubString", "parserFindSubString" )
             ]
         ++ dottedRows "Basics."
             [ ( "identity", "identity" )

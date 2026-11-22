@@ -6,6 +6,7 @@ module Type.Env exposing
     , collectFile
     , merge
     , insert, insertCtor, insertAlias
+    , infixImpls
     , lookupValue, lookupCtor, lookupAlias
     , instantiate, instantiateRigid, instantiatePartial, instantiateExistential, expandAliases
     , generalize, generalizeAvoiding
@@ -103,6 +104,7 @@ type alias Env =
     { values : Dict String Scheme
     , ctors : Dict String Scheme
     , aliases : Dict String Alias
+    , infixes : Dict String (List String)
     }
 
 
@@ -111,6 +113,7 @@ empty =
     { values = Dict.empty
     , ctors = Dict.empty
     , aliases = Dict.empty
+    , infixes = Dict.empty
     }
 
 
@@ -144,7 +147,9 @@ collectFile file =
         gadtNames =
             collectGadtNames self file.declarations
     in
-    List.foldl (collectDecl self typeTable typeKinds gadtNames) empty file.declarations
+    List.foldl (collectDecl self typeTable typeKinds gadtNames)
+        { empty | infixes = infixDeclsOf self file.declarations }
+        file.declarations
 
 
 collectDecl : String -> TypeTable -> Dict String (List Kind) -> List String -> Node Declaration -> Env -> Env
@@ -171,8 +176,19 @@ collectDecl self typeTable typeKinds gadtNames node env =
             let
                 qname =
                     self ++ "." ++ nodeString aliasDecl.name
+
+                alias =
+                    buildAlias self qname typeTable aliasDecl
             in
-            insertAlias qname (buildAlias self qname typeTable aliasDecl) env
+            insertAlias qname alias env
+                |> (\e ->
+                        case recordAliasCtorScheme alias of
+                            Just scheme ->
+                                insertCtor qname scheme e
+
+                            Nothing ->
+                                e
+                   )
 
         _ ->
             env
@@ -202,6 +218,41 @@ collectCtors self typeTable typeDecl env =
         )
         env
         typeDecl.constructors
+
+
+{-| `type alias DeadEnd context problem = { row : Int, ... }` introduces a
+CONSTRUCTOR: `DeadEnd : Int -> Int -> problem -> ... -> DeadEnd context problem`,
+one argument per field in SOURCE order.  elm/parser writes exactly that
+(`AddRight Empty (DeadEnd s.row s.col x s.context)`), so a package that uses the
+record-alias constructor cannot compile without it.
+
+The body is already a converted `TRecord` whose generic references are the
+alias's own sentinel vars, so the scheme is the field types folded into a
+function ending at `TCon <alias> <generics>` — `generalize` then quantifies the
+generics, which is the same shape `ctorScheme` builds for an ADT constructor.
+
+Open rows are NOT constructible (a `{ a | ... }` alias has no fixed field list):
+nothing is inserted, which is the honest refusal — the name simply does not
+resolve as a value, exactly as before.
+-}
+recordAliasCtorScheme : Alias -> Maybe Scheme
+recordAliasCtorScheme alias =
+    case alias.body of
+        TRecord row ->
+            if row.tail == REmpty then
+                Just
+                    (generalize
+                        (List.foldr TFun
+                            (TCon alias.name (List.map TVar alias.genericVars))
+                            (List.map Tuple.second row.fields)
+                        )
+                    )
+
+            else
+                Nothing
+
+        _ ->
+            Nothing
 
 
 {-| Build an `Alias` from its declaration: pre-convert the body annotation with
@@ -466,6 +517,33 @@ collectRowNames typeTable self typeKinds ann acc =
                 |> collectRowNames typeTable self typeKinds (Node.value right)
 
 
+{-| `infix left 5 (|=) = keeper` -> `"|=" -> ["ThisModule.keeper"]`.  One entry
+per declaration, in file order.  This is the table the VALUE-position operator
+rule reads (`Type.Infer`) and the lowerer's `FromAst.operatorValue` mirrors; the
+per-unit alias row (`Lower.Resolve.infixAliases`) is what governs an infix
+APPLICATION.
+-}
+infixDeclsOf : String -> List (Node Declaration) -> Dict String (List String)
+infixDeclsOf self decls =
+    List.foldl (infixDeclStep self) Dict.empty decls
+
+
+infixDeclStep : String -> Node Declaration -> Dict String (List String) -> Dict String (List String)
+infixDeclStep self (Node _ decl) acc =
+    case decl of
+        InfixDeclaration infixDecl ->
+            let
+                impl =
+                    self ++ "." ++ Node.value infixDecl.function
+            in
+            Dict.update (Node.value infixDecl.operator)
+                (\old -> Just (Maybe.withDefault [] old ++ [ impl ]))
+                acc
+
+        _ ->
+            acc
+
+
 {-| The generic kinds of every ADT declared in the file, keyed by qualified
 type name. An ADT generic is `KRow` iff its name appears at a record-tail
 position in ANY of the type's constructor annotations (the same test
@@ -594,7 +672,32 @@ merge a b =
     { values = Dict.union a.values b.values
     , ctors = Dict.union a.ctors b.ctors
     , aliases = Dict.union a.aliases b.aliases
+    , infixes = mergeInfixes a.infixes b.infixes
     }
+
+
+{-| Operator tables UNION by appending (both sides' declarations survive, in
+collection order): the whole point of the table is that `|=` declared by two
+modules keeps BOTH implementations visible, so the value-position rule can pick
+the one that is not the module's own.  `Dict.union` (first wins) would silently
+drop the second, which is the case elm/parser creates.
+-}
+mergeInfixes : Dict String (List String) -> Dict String (List String) -> Dict String (List String)
+mergeInfixes a b =
+    List.foldl
+        (\( op, impls ) acc ->
+            Dict.update op (\old -> Just (Maybe.withDefault [] old ++ impls)) acc
+        )
+        a
+        (Dict.toList b)
+
+
+{-| The implementations of one operator, in collection order.  First element is
+the module that declared it first; every element is a QUALIFIED global key.
+-}
+infixImpls : String -> Env -> List String
+infixImpls op env =
+    Maybe.withDefault [] (Dict.get op env.infixes)
 
 
 insert : String -> Scheme -> Env -> Env

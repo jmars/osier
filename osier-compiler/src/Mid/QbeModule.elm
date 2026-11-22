@@ -1135,7 +1135,7 @@ compileAllJoin :
     -> Dict String (List Int)
     -> Result String ( List Defun, Dict String (Dict Int Type), Dict String (List Int) )
 compileAllJoin globals units nodeTypesByModule refinedVarsByModule =
-    sequence (List.map (\u -> Result.map (\( ds, rs ) -> ( u.moduleName, ds, rs )) (MidModule.compileUnitJoin globals u)) units)
+    sequence (List.map (\u -> Result.map (\( ds, rs ) -> ( u.moduleName, ds, rs )) (MidModule.compileUnitJoin globals (MidModule.infixTableOf units) u)) units)
         |> Result.map
             (\triples ->
                 ( List.concatMap (\( _, ds, _ ) -> ds) triples

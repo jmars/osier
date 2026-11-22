@@ -135,7 +135,7 @@ inferUnit env file =
             LowerModule.exportedNames file.moduleDefinition definedNames
 
         aliasTable =
-            LowerModule.aliasTableFor self exported file.imports
+            LowerModule.aliasTableFor self exported file.declarations file.imports
 
         ( top, unsignatured, state0 ) =
             seedTop env selfStr names Uni.emptyState
@@ -633,16 +633,107 @@ resolveValue ctx range modName name =
                 fail (Error.atRange range ("unknown name: " ++ joinName (modName ++ [ name ])) "")
 
 
-{-| The scheme of an operator used as a value (`(+)`, `(++)`, ...).
+{-| The scheme of an INFIX APPLICATION (`a |= b`).
+
+Builtins first: the special-variable schemes (`+` is `number -> number ->
+number`, not a real function).  Then the ALIAS TABLE, which is what an `infix`
+declaration contributes (`|=` -> `ThisModule.keeper`, see
+`Lower.Resolve.infixAliases`): the operator's type is then exactly its
+implementation function's, taken from scope, so a package's operator is typed
+like the function it names and nothing here has to know what `Parser` is.
 -}
-resolveOperator : Env -> Range -> String -> M Type
-resolveOperator env range op =
+resolveOperator : Ctx -> Range -> String -> M Type
+resolveOperator ctx range op =
     case Builtins.operatorScheme op of
         Just scheme ->
-            instantiate env range scheme
+            instantiate ctx.env range scheme
 
         Nothing ->
-            fail (Error.atRange range ("unsupported operator: " ++ op) "")
+            case resolveScheme ctx [] op of
+                Just scheme ->
+                    instantiate ctx.env range scheme
+
+                Nothing ->
+                    -- No row in this unit's table: a CONSUMER of the package.
+                    -- `import Parser exposing ((|=), (|.))` is an InfixExpose,
+                    -- which contributes no alias row (the row would have to name
+                    -- the DEFINING module's implementation), so an operator
+                    -- imported from another unit is resolved through the
+                    -- program-wide table instead.  The lowerer's
+                    -- `FromAst.operatorApplication` falls back exactly here.
+                    case infixImplFor ctx op of
+                        Just scheme ->
+                            instantiate ctx.env range scheme
+
+                        Nothing ->
+                            fail (Error.atRange range ("unsupported operator: " ++ op) "")
+
+
+{-| The scheme of an operator used as a VALUE (`(|=)`, `(::)`, ...).
+
+This is NOT the alias-table question: Elm binds a first-class operator to the
+implementation that is in scope as a NAME, and an `import A exposing ((|=))` is
+exactly that.  A module that re-exports an operator writes
+
+    keeper = (|=)
+
+and its own `infix ... (|=) = keeper` would make that binding CIRCULAR, so the
+declaring module that is not this one is preferred — elm/parser's Parser.elm
+re-exports Parser.Advanced.keeper this way, and both are the same function.
+
+The table is `Env.infixes` (every collected unit's declarations); a module with
+no `infix` declaration and no import of the operator still fails here, which is
+the honest answer — an operator is not in scope unless something declares it.
+-}
+resolveOperatorValue : Ctx -> Range -> String -> M Type
+resolveOperatorValue ctx range op =
+    case Builtins.operatorScheme op of
+        Just scheme ->
+            instantiate ctx.env range scheme
+
+        Nothing ->
+            case infixImplFor ctx op of
+                Just impl ->
+                    instantiate ctx.env range impl
+
+                Nothing ->
+                    fail (Error.atRange range ("unsupported operator used as a value: " ++ op) "")
+
+
+infixImplFor : Ctx -> String -> Maybe Scheme
+infixImplFor ctx op =
+    let
+        impls =
+            Env.infixImpls op ctx.env
+
+        selfStr =
+            joinName ctx.self
+
+        foreign =
+            List.filter (\impl -> not (String.startsWith (selfStr ++ ".") impl)) impls
+
+        ordered =
+            case foreign of
+                [] ->
+                    impls
+
+                _ ->
+                    foreign
+
+        lookup impl =
+            case Env.lookupValue impl ctx.env of
+                Just scheme ->
+                    Just scheme
+
+                Nothing ->
+                    Dict.get impl ctx.top
+    in
+    case ordered of
+        impl :: _ ->
+            lookup impl
+
+        [] ->
+            Nothing
 
 
 {-| Free variables of the enclosing environment (globals + top-level group +
@@ -707,10 +798,10 @@ inferExprGo ctx (Node range expr) =
             resolveValue ctx range modName name
 
         PrefixOperator op ->
-            resolveOperator ctx.env range op
+            resolveOperatorValue ctx range op
 
         Operator op ->
-            resolveOperator ctx.env range op
+            resolveOperatorValue ctx range op
 
         Negation inner ->
             fresh KType FNumber
@@ -746,7 +837,7 @@ inferExprGo ctx (Node range expr) =
                 inferAppend ctx range left right
 
             else
-                resolveOperator ctx.env range op
+                resolveOperator ctx range op
                     |> andThen (\opType ->
                         inferExpr ctx left
                             |> andThen (\lt ->

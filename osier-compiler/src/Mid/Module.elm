@@ -1,4 +1,4 @@
-module Mid.Module exposing (Unit, parseAll, collectAll, mergedGlobals, compileUnit, compileUnitJoin, sequenceMaps, collectTypeNames)
+module Mid.Module exposing (Unit, parseAll, collectAll, mergedGlobals, infixTableOf, compileUnit, compileUnitJoin, sequenceMaps, collectTypeNames)
 
 -- Mid.Module — the middle tier's ORCHESTRATION (sources -> Mid.Ir.Program).
 --
@@ -26,6 +26,7 @@ import Elm.Syntax.Node as Node exposing (Node(..))
 import Elm.Syntax.Pattern as Pattern exposing (Pattern(..))
 import Elm.Syntax.Range as Range exposing (Range)
 import Elm.Syntax.Type as Type
+import Elm.Syntax.TypeAnnotation as TypeAnnotation
 import Lower.Expr as Expr
 import Lower.Resolve as Resolve
 import Mid.FromAst as FromAst
@@ -47,6 +48,7 @@ type alias Unit =
     { moduleName : List String
     , funs : List ( String, Function )
     , ctors : List ( String, Int )
+    , aliasCtors : List ( String, List String )
     , file : File.File
     }
 
@@ -167,6 +169,7 @@ collectUnit file =
                                         { moduleName = modName
                                         , funs = funs
                                         , ctors = ctors
+                                        , aliasCtors = collectAliasCtors file.declarations
                                         , file = file
                                         }
                                     )
@@ -204,11 +207,40 @@ mergeStep unit accResult =
                         fnsArity =
                             List.map (\( nm, fn ) -> ( nm, functionArity fn )) unit.funs
 
+                        -- A record type alias's CONSTRUCTOR is a real function
+                        -- (`DeadEnd : Int -> Int -> ... -> DeadEnd`), one arity per
+                        -- field.  Registered here like a ctor so a cross-unit use
+                        -- (`Parser.problemToDeadEnd`) resolves as a global.
+                        aliasArity =
+                            List.map (\( n, fields ) -> ( n, List.length fields )) unit.aliasCtors
+
                         qualifiedPairs =
                             List.map (\( n, ar ) -> ( Resolve.qualify unit.moduleName n, ar ))
-                                (fnsArity ++ unit.ctors)
+                                (fnsArity ++ unit.ctors ++ aliasArity)
                     in
                     Ok (List.foldl (\( k, v ) d -> Dict.insert k v d) acc qualifiedPairs)
+
+
+{-| The program's OPERATOR table: symbol -> the qualified implementation
+functions that declare it, in unit order (`Resolve.infixAliases` is the same
+information per unit, for the application path).  A program-wide table is what
+makes a re-exported operator resolvable: elm/parser's Parser.elm writes
+`keeper = (|=)` and the value must be Parser.Advanced.keeper, which only a table
+covering BOTH units can name.
+-}
+infixTableOf : List Unit -> Dict String (List String)
+infixTableOf units =
+    List.foldl
+        (\unit acc ->
+            List.foldl
+                (\( op, impl ) ->
+                    Dict.update op (\old -> Just (Maybe.withDefault [] old ++ [ impl ]))
+                )
+                acc
+                (Resolve.infixAliases unit.moduleName unit.file.declarations)
+        )
+        Dict.empty
+        units
 
 
 sequenceMaps : List (Result String a) -> Result String (List a)
@@ -279,6 +311,37 @@ addCtor node acc =
             ( nodeString vc.name, List.length vc.arguments ) :: acc
 
 
+{-| Every record type alias in the file, as (alias name, field names in SOURCE
+order).  This is the CONSTRUCTOR elm gives a record alias for free
+(`type alias DeadEnd c x = { row : Int, col : Int, problem : x, ... }` makes
+`DeadEnd : Int -> Int -> x -> ... -> DeadEnd c x`), and elm/parser uses it:
+`AddRight Empty (DeadEnd s.row s.col x s.context)`.  An OPEN record alias
+(`{ a | ... }`) has no fixed field list and therefore no constructor; it is
+skipped, which leaves the name unresolvable exactly as before.
+-}
+collectAliasCtors : List (Node Declaration.Declaration) -> List ( String, List String )
+collectAliasCtors decls =
+    List.filterMap aliasCtorOf decls
+
+
+aliasCtorOf : Node Declaration.Declaration -> Maybe ( String, List String )
+aliasCtorOf (Node _ decl) =
+    case decl of
+        AliasDeclaration aliasDecl ->
+            case Node.value aliasDecl.typeAnnotation of
+                TypeAnnotation.Record fields ->
+                    Just
+                        ( nodeString aliasDecl.name
+                        , List.map (\(Node _ ( fieldName, _ )) -> nodeString fieldName) fields
+                        )
+
+                _ ->
+                    Nothing
+
+        _ ->
+            Nothing
+
+
 collectTypeNames : List (Node Declaration.Declaration) -> List String
 collectTypeNames decls =
     List.filterMap typeName decls
@@ -303,8 +366,14 @@ forbiddenDecl (Node _ decl) =
         Declaration.PortDeclaration _ ->
             Just "port declarations are not supported"
 
-        Declaration.InfixDeclaration _ ->
-            Just "infix declarations are not supported"
+        -- ACCEPTED since the elm-core-parity slice: `infix left 5 (|=) = keeper`
+        -- is how a package names the function behind its own operator, and
+        -- elm/parser's two modules both declare one.  The declaration carries no
+        -- body to lower — `Resolve.infixAliases` turns it into the one alias row
+        -- (`|=` -> `ThisModule.keeper`) that both the typechecker and the
+        -- lowerer already know how to follow.  The PRECEDENCE in the declaration
+        -- is not read: the expression parser's table is fixed and already holds
+        -- elm/parser's rows (`|=` 5 left, `|.` 6 left).
 
         _ ->
             Nothing
@@ -367,11 +436,11 @@ keyed by `Range`, the Mid tree by binder id, and this map is the only bridge.
 -}
 compileUnit : Dict String Int -> Unit -> Result String (List Defun)
 compileUnit globals unit =
-    Result.map Tuple.first (compileUnitJoin globals unit)
+    Result.map Tuple.first (compileUnitJoin globals Dict.empty unit)
 
 
-compileUnitJoin : Dict String Int -> Unit -> Result String ( List Defun, Dict String (Dict Int Range) )
-compileUnitJoin globals unit =
+compileUnitJoin : Dict String Int -> Dict String (List String) -> Unit -> Result String ( List Defun, Dict String (Dict Int Range) )
+compileUnitJoin globals infixes unit =
     let
         modName =
             unit.moduleName
@@ -383,10 +452,11 @@ compileUnitJoin globals unit =
             Resolve.exportedNames unit.file.moduleDefinition definedNames
 
         aliasTable =
-            Resolve.aliasTableFor modName exported unit.file.imports
+            Resolve.aliasTableFor modName exported unit.file.declarations unit.file.imports
 
         baseCtx =
             FromAst.newContext modName globals
+                |> FromAst.withInfixImpls infixes
                 |> FromAst.withImport aliasTable
                 |> FromAst.withModuleAliases (Resolve.moduleAliasTable unit.file.imports)
                 |> FromAst.withOpenTypeModules (Resolve.openTypeModules unit.file.imports)
@@ -397,20 +467,24 @@ compileUnitJoin globals unit =
                 sequenceMaps (List.map (\ctor -> FromAst.runGenJoin (ctorDefun modName ctor)) unit.ctors)
                     |> Result.andThen
                         (\ctorPairs ->
-                            wrapperDefuns
-                                |> Result.map
-                                    (\wrapperDefs ->
-                                        ( fnDefuns ++ List.map Tuple.first ctorPairs ++ wrapperDefs
-                                        , let
-                                            joined =
-                                                List.foldl (\( defun, ranges ) acc -> Dict.insert defun.key ranges acc) fnJoin ctorPairs
-                                          in
-                                          -- Wrappers' binders are all synthetic (no
-                                          -- source ranges exist): EMPTY join entries,
-                                          -- so the table's domain is every defun and
-                                          -- "absent" is reserved for "unit not checked".
-                                          List.foldl (\d a -> Dict.insert d.key Dict.empty a) joined wrapperDefs
-                                        )
+                            sequenceMaps (List.map (\a -> FromAst.runGenJoin (aliasCtorDefun modName a)) unit.aliasCtors)
+                                |> Result.andThen
+                                    (\aliasPairs ->
+                                        wrapperDefuns
+                                            |> Result.map
+                                                (\wrapperDefs ->
+                                                    ( fnDefuns ++ List.map Tuple.first ctorPairs ++ List.map Tuple.first aliasPairs ++ wrapperDefs
+                                                    , let
+                                                        joined =
+                                                            List.foldl (\( defun, ranges ) acc -> Dict.insert defun.key ranges acc) fnJoin (ctorPairs ++ aliasPairs)
+                                                      in
+                                                      -- Wrappers' binders are all synthetic (no
+                                                      -- source ranges exist): EMPTY join entries,
+                                                      -- so the table's domain is every defun and
+                                                      -- "absent" is reserved for "unit not checked".
+                                                      List.foldl (\d a -> Dict.insert d.key Dict.empty a) joined wrapperDefs
+                                                    )
+                                                )
                                     )
                         )
             )
@@ -559,6 +633,27 @@ ctorDefun modName ( name, n ) =
                 }
         )
         (FromAst.freshBinders (List.map (\i -> "$arg" ++ String.fromInt i) (List.range 1 n)))
+
+
+{-| One defun per record type alias: bind one param per field and build the
+record literal with those params.  `RecordLit`'s list is in SOURCE field order
+(see `FromAst.recordExpr`), which is the order the alias constructor's arguments
+arrive in.
+-}
+aliasCtorDefun : List String -> ( String, List String ) -> FromAst.Gen Defun
+aliasCtorDefun modName ( name, fields ) =
+    FromAst.andThen
+        (\params ->
+            FromAst.pure
+                { key = Resolve.qualify modName name
+                , value =
+                    Lam
+                        { params = params
+                        , body = RecordLit (List.map2 (\f p -> ( f, Var p.id )) fields params)
+                        }
+                }
+        )
+        (FromAst.freshBinders (List.map (\i -> "$field" ++ String.fromInt i) (List.range 1 (List.length fields))))
 
 
 -- 2-arg curried wrapper: the body's args are in the prim's POP order, so the

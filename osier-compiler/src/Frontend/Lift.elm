@@ -195,6 +195,7 @@ liftFile file =
                 (Resolve.aliasTableFor
                     (SyntaxModule.moduleName (Node.value file.moduleDefinition))
                     (Resolve.exportedNames file.moduleDefinition declared)
+                    file.declarations
                     file.imports
                 )
                 ++ declared

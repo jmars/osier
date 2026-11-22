@@ -14,6 +14,7 @@ module Mid.FromAst exposing
     , freshBindersAt
     , withScope
     , withImport
+    , withInfixImpls
     , withModuleAliases
     , withOpenTypeModules
     , fromExpression
@@ -90,6 +91,7 @@ type alias Context =
     , imports : List ( String, String )
     , moduleAliases : List ( String, String )
     , openTypeModules : List (List String)
+    , infixImpls : Dict String (List String)
     }
 
 
@@ -101,6 +103,7 @@ newContext moduleName globals =
     , imports = []
     , moduleAliases = []
     , openTypeModules = []
+    , infixImpls = Dict.empty
     }
 
 
@@ -114,6 +117,15 @@ withScope ctx binders =
 withImport : List ( String, String ) -> Context -> Context
 withImport imports ctx =
     { ctx | imports = imports }
+
+
+-- `infix left 5 (|=) = keeper` in ANY unit of the program, as
+-- `"|=" -> ["Mod.keeper", ...]` (see `Mid.Module.infixTableOf`).  Only the
+-- VALUE-position operator rule reads this; an infix APPLICATION goes through the
+-- per-unit alias row (`imports`) instead.
+withInfixImpls : Dict String (List String) -> Context -> Context
+withInfixImpls impls ctx =
+    { ctx | infixImpls = impls }
 
 
 withModuleAliases : List ( String, String ) -> Context -> Context
@@ -574,14 +586,100 @@ resolveGlobal ctx name =
             fail ("unknown name: " ++ name)
 
 
+{-| An operator in VALUE position (`keeper = (|=)`).
+
+A prim operator (`(+)`) is the curried prim wrapper.  Anything else is a
+package's own operator, and its value is the implementation function that some
+unit's `infix` declaration names — preferring one from a module OTHER than this
+one, because a module that re-exports an operator (`keeper = (|=)` in elm/parser's
+Parser.elm) would otherwise name its own definition and recurse forever.  This
+is the same rule `Type.Infer.resolveOperatorValue` applies, so the two passes
+agree on the operand's type and its code.
+-}
 operatorValue : Context -> String -> Gen Exp
-operatorValue _ op =
+operatorValue ctx op =
     case primWrapperName op of
         Just wname ->
             pure (GRef { key = wname, force = False })
 
         Nothing ->
-            fail ("unsupported operator used as a value: " ++ op)
+            case pipeAsValue op of
+                Just exp ->
+                    exp
+
+                Nothing ->
+                    case infixImplKey ctx op of
+                        Just key ->
+                            globalRefByKey ctx key
+
+                        Nothing ->
+                            fail ("unsupported operator used as a value: " ++ op)
+
+
+-- `(<|)` / `(|>)` as FIRST-CLASS values (`map2 (<|) f g` — elm/parser's
+-- `keeper`).  There is no curried prim wrapper behind them: an APPLICATION site
+-- is lowered straight to a call (`pipeApply`), so the value form is minted here
+-- as the 2-param lambda it means — `\f x -> f x` for `<|`, `\x f -> f x` for
+-- `|>`.  `<>`-style operator values are not covered; this is the pair the
+-- package needs and both are pipe aliases with no prim.
+pipeAsValue : String -> Maybe (Gen Exp)
+pipeAsValue op =
+    if op == "|>" then
+        Just (applyValueLambda "lpX" "lpF" True)
+
+    else if op == "<|" then
+        Just (applyValueLambda "lpF" "lpX" False)
+
+    else
+        Nothing
+
+
+applyValueLambda : String -> String -> Bool -> Gen Exp
+applyValueLambda nameF nameX swapped =
+    andThen
+        (\pf ->
+            andThen
+                (\px ->
+                    pure
+                        (Lam
+                            { params = [ pf, px ]
+                            , body =
+                                if swapped then
+                                    App { fn = Var px.id, args = [ Var pf.id ] }
+
+                                else
+                                    App { fn = Var pf.id, args = [ Var px.id ] }
+                            }
+                        )
+                )
+                (freshBinder nameX)
+        )
+        (freshBinder nameF)
+
+
+{-| The qualified key of an operator's implementation, from the program-wide
+table (`Mid.Module.infixTableOf`).  A module that re-exports an operator
+(`keeper = (|=)`) is looking for the OTHER module's function: taking its own
+would be the definition referring to itself.
+-}
+infixImplKey : Context -> String -> Maybe String
+infixImplKey ctx op =
+    let
+        impls =
+            Maybe.withDefault [] (Dict.get op ctx.infixImpls)
+
+        selfPrefix =
+            String.join "." ctx.moduleName ++ "."
+
+        foreign =
+            List.filter (\impl -> not (String.startsWith selfPrefix impl)) impls
+    in
+    case foreign of
+        impl :: _ ->
+            Just impl
+
+        [] ->
+            List.head impls
 
 
 operatorApplication : Context -> Range -> String -> Node Expression -> Node Expression -> Gen Exp
@@ -616,7 +714,42 @@ operatorApplication ctx range op left right =
                         (fromExpression ctx right)
 
                 Nothing ->
-                    fail ("unsupported operator: " ++ op)
+                    -- A PACKAGE's own operator: `infix left 5 (|=) = keeper`
+                    -- puts the row (`|=` -> `ThisModule.keeper`) in this unit's
+                    -- alias table (`Lower.Resolve.infixAliases`), so the
+                    -- application is the ordinary 2-arg call `keeper l r` and
+                    -- nothing here names the package.  Right is emitted before
+                    -- left, matching the prim arm above.
+                    case tryAllTokens ctx [ op, String.join "." ctx.moduleName ++ "." ++ op ] of
+                        Just fnGen ->
+                            andThen
+                                (\rcode ->
+                                    andThen
+                                        (\lcode -> map (\f -> App { fn = f, args = [ lcode, rcode ] }) fnGen)
+                                        (fromExpression ctx left)
+                                )
+                                (fromExpression ctx right)
+
+                        Nothing ->
+                            -- An operator IMPORTED from another unit
+                            -- (`import Parser exposing ((|=))`): no alias row
+                            -- exists for it, so resolve it through the
+                            -- program-wide table — the same fallback
+                            -- `Type.Infer.resolveOperator` takes.
+                            case infixImplKey ctx op of
+                                Just key ->
+                                    andThen
+                                        (\rcode ->
+                                            andThen
+                                                (\lcode ->
+                                                    map (\f -> App { fn = f, args = [ lcode, rcode ] }) (globalRefByKey ctx key)
+                                                )
+                                                (fromExpression ctx left)
+                                        )
+                                        (fromExpression ctx right)
+
+                                Nothing ->
+                                    fail ("unsupported operator: " ++ op)
 
 
 -- `x |> f a b` desugars to the SINGLE application `f a b x` (and `<|`
