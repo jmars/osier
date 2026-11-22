@@ -2816,8 +2816,13 @@ defun Rt.read-byte(stream : val) -> val {
 // does for a string cell, because a `d`-class operand cannot cross this ABI.
 defun Rt.allocFloat(count : val) -> val {
   word glob = rawcall rt_glob_addr();
-  word regionW = wload(glob, 0);
-  val region = (mkbool(regionW != 0)) ? mknum(regionW) : call Rt.gcInit(mknum(0));
+  // THE REGION WORD, NO SELECT (perf U-P2 alloc-slim; see Rt.allocVector's note).
+  word rw0 = wload(glob, 0);
+  val region = if (rw0 != 0) {
+    return mknum(rw0);
+  } else {
+    return call Rt.gcInit(mknum(0));
+  };
   return call Rt.gcAlloc(region, mknum(12), mknum(payload(count, 0)));
 }
 defun Rt.mkStream(what : val, flags : val) -> val {
@@ -2859,8 +2864,13 @@ defun Rt.mkStream(what : val, flags : val) -> val {
 // `.mid` tree cannot show it.
 defun Rt.boxInt(n : word) -> val {
   word glob = rawcall rt_glob_addr();
-  word regionW = wload(glob, 0);
-  val region = (mkbool(regionW != 0)) ? mknum(regionW) : call Rt.gcInit(mknum(0));
+  // THE REGION WORD, NO SELECT (perf U-P2 alloc-slim; see Rt.allocVector's note).
+  word rw0 = wload(glob, 0);
+  val region = if (rw0 != 0) {
+    return mknum(rw0);
+  } else {
+    return call Rt.gcInit(mknum(0));
+  };
   word body = vecbody(call Rt.allocKind(mknum(13), mknum(1)));
   wstore(body, 0, n);
   return mkval(13, body);
@@ -5687,10 +5697,28 @@ defun Rt.gcInit(dummy : val) -> val {
 // toggle) between "the word is non-null" and "return it".  If that ever gains
 // one, this fast path must carry it too; probe-midgc-guards.sh's stress-preinit
 // arm is the probe that keeps the null path exercised.
+//
+// THE SPELLING IS A DEAD BIND, NOT A SELECT (perf U-P2 alloc-slim).  It used to
+// be `(mkbool(regionW != 0)) ? mknum(regionW) : call Rt.gcInit(..)`, and a
+// select materialises its CONDITION as a Value in a slot, dispatches that
+// Value's tag, runs the taken arm through `mknum` and joins in another slot:
+// ~20 instructions, on EVERY allocation, to choose between a word the caller
+// already holds and a call.  The dead bind below takes the chosen arm's value
+// and continues (gcAlloc's trigger note's idiom) with the CONDITION a bare word
+// compare, so the fast arm is a load, a compare, a branch and the one `mknum`
+// the `val` parameter needs.  The WORD dead bind frameBlock uses is not
+// available here — a `return <word>` in a `-> val` defun is a loud checker
+// reject ("return is word but '-> val' is declared", MEASURED), which is the
+// same class boundary that keeps the seats `val`-returning.  The null arm is
+// the boot window and pays exactly what it did before.
 defun Rt.allocVector(count : val) -> val {
   word glob = rawcall rt_glob_addr();
-  word regionW = wload(glob, 0);
-  val region = (mkbool(regionW != 0)) ? mknum(regionW) : call Rt.gcInit(mknum(0));
+  word rw0 = wload(glob, 0);
+  val region = if (rw0 != 0) {
+    return mknum(rw0);
+  } else {
+    return call Rt.gcInit(mknum(0));
+  };
   word countW = payload(count, 0);
   // >>> QBE_VAL-ONLY
   return call Rt.gcAlloc(region, mknum(1), mknum(countW));
@@ -5701,8 +5729,13 @@ defun Rt.allocVector(count : val) -> val {
 }
 defun Rt.allocRaw(nbytes : val) -> val {
   word glob = rawcall rt_glob_addr();
-  word regionW = wload(glob, 0);
-  val region = (mkbool(regionW != 0)) ? mknum(regionW) : call Rt.gcInit(mknum(0));
+  // THE REGION WORD, NO SELECT (perf U-P2 alloc-slim; see Rt.allocVector's note).
+  word rw0 = wload(glob, 0);
+  val region = if (rw0 != 0) {
+    return mknum(rw0);
+  } else {
+    return call Rt.gcInit(mknum(0));
+  };
   word nbytesW = payload(nbytes, 0);
   word bodyWords = (nbytesW + 7) / 8;
   // >>> QBE_VAL-ONLY
@@ -5774,8 +5807,13 @@ defun Rt.allocRaw(nbytes : val) -> val {
 // 4 words and a vector 2 + n — the body-size rule RtLayout.bodyWords states.
 defun Rt.allocCons(dummy : val) -> val {
   word glob = rawcall rt_glob_addr();
-  word regionW = wload(glob, 0);
-  val region = (mkbool(regionW != 0)) ? mknum(regionW) : call Rt.gcInit(mknum(0));
+  // THE REGION WORD, NO SELECT (perf U-P2 alloc-slim; see Rt.allocVector's note).
+  word rw0 = wload(glob, 0);
+  val region = if (rw0 != 0) {
+    return mknum(rw0);
+  } else {
+    return call Rt.gcInit(mknum(0));
+  };
   return call Rt.gcAlloc(region, mknum(4), mknum(2));
 }
 // THE RECORD BLOCK (perf word-arm-records R2).  A word-arm record is ONE
@@ -5792,8 +5830,13 @@ defun Rt.allocCons(dummy : val) -> val {
 // can allocate `n` and store `n + 1` words.
 defun Rt.allocRecord(count : val) -> val {
   word glob = rawcall rt_glob_addr();
-  word regionW = wload(glob, 0);
-  val region = (mkbool(regionW != 0)) ? mknum(regionW) : call Rt.gcInit(mknum(0));
+  // THE REGION WORD, NO SELECT (perf U-P2 alloc-slim; see Rt.allocVector's note).
+  word rw0 = wload(glob, 0);
+  val region = if (rw0 != 0) {
+    return mknum(rw0);
+  } else {
+    return call Rt.gcInit(mknum(0));
+  };
   return call Rt.gcAlloc(region, mknum(14), mknum(payload(count, 0) + 1));
 }
 // THE SYMBOL CELL (perf word-arm-records R1).  A word-arm SYMBOL is a code-2
@@ -5812,14 +5855,24 @@ defun Rt.allocRecord(count : val) -> val {
 // cannot be the caller's afterthought.  `count` is the BODY word count (2).
 defun Rt.allocSym(count : val) -> val {
   word glob = rawcall rt_glob_addr();
-  word regionW = wload(glob, 0);
-  val region = (mkbool(regionW != 0)) ? mknum(regionW) : call Rt.gcInit(mknum(0));
+  // THE REGION WORD, NO SELECT (perf U-P2 alloc-slim; see Rt.allocVector's note).
+  word rw0 = wload(glob, 0);
+  val region = if (rw0 != 0) {
+    return mknum(rw0);
+  } else {
+    return call Rt.gcInit(mknum(0));
+  };
   return call Rt.gcAlloc(region, mknum(2), mknum(payload(count, 0)));
 }
 defun Rt.allocKind(code : val, count : val) -> val {
   word glob = rawcall rt_glob_addr();
-  word regionW = wload(glob, 0);
-  val region = (mkbool(regionW != 0)) ? mknum(regionW) : call Rt.gcInit(mknum(0));
+  // THE REGION WORD, NO SELECT (perf U-P2 alloc-slim; see Rt.allocVector's note).
+  word rw0 = wload(glob, 0);
+  val region = if (rw0 != 0) {
+    return mknum(rw0);
+  } else {
+    return call Rt.gcInit(mknum(0));
+  };
   // CODE 0 IS NOT A CONSTRUCTOR (perf VR3c FIX 2): it means NO CODE — a
   // val-arm header — and it is the one code the word arm's readers will refuse.
   // A general seat is the only place a caller could still ask for it, so the
@@ -5856,7 +5909,8 @@ defun Rt.allocKind(code : val, count : val) -> val {
 // CODE 0 HAS EXACTLY ONE OWNER: NO CODE.  The val arm writes nothing into bits
 // 24..27, so a header whose code is 0 is a VAL-ARM header, and NO word-arm
 // allocator writes it (allocVector 10, allocCons 4, allocRaw 1, allocKind
-// caller-supplied — see the seats block below; kindHdr is the only writer).
+// caller-supplied — see the seats block below; the allocation writers inline
+// `kindHdr`'s arithmetic, so the code is decided at the seat and nowhere else).
 // The refusal itself is a PROMISSORY NOTE, stated as such: no runtime reader
 // tests for code 0 yet, because the only reader that will is the word arm's
 // `tagis`, which is the emitter's (VR3b3).  What IS landed and checkable here
@@ -5964,9 +6018,15 @@ defun Rt.allocKind(code : val, count : val) -> val {
 // spellings below differ by exactly that term and nothing else.
 // <<< QBE_WORDVAL-ONLY
 // >>> QBE_WORDVAL-ONLY
-// THE HEADER WORD, WORD ARM (perf VR3c AREA 2).  ONE place builds a fresh
-// header, so every writer below (gcAlloc's young and bump paths, gcAllocGo's
-// free-list pop, gcPromoteAlloc's three) stores the SAME word:
+// THE HEADER WORD, WORD ARM (perf VR3c AREA 2; the arithmetic inlined at the
+// hot writers by perf U-P2 alloc-slim).  `Rt.kindHdr` below is the contract's
+// REFERENCE statement of the number; the allocation path's writers (gcAlloc's
+// young and bump paths, gcAllocGo's free-list pop, gcPromoteAlloc's three)
+// spell the SAME arithmetic inline, because the defun call was a boxed `:val`
+// call — a whole frame per allocation — for a five-compare, two-shift sum.  The
+// cold writers (Rt.boot's three cells, Rt.globalClosure) still call it, so the
+// defun has live callers and its rows stay honest.  EVERY writer stores the
+// SAME word:
 //
 //   bit 1      SCAN KIND  DERIVED from the kind code (the five-code set the
 //                         KIND-CONTRACT block above names) — never carried
@@ -5978,6 +6038,11 @@ defun Rt.allocKind(code : val, count : val) -> val {
 // as the product of a power of two for the reason this file's other big
 // constants are (the surface's integer literals are exact, but a bare 2^24
 // literal in a SHIFT would hide which layout number it is).
+//
+// A change to that set or to the shift is a change in BOTH places: the defun
+// and the three inlined sites.  TestMain's VR3c AREA 2 row parses the defun
+// (`defun Rt.kindHdr`, its `scan` line and its `return mknum(...)`), which is
+// why the defun is kept as the statement rather than deleted.
 defun Rt.kindHdr(kind : val, cls : val) -> val {
   word k = payload(kind, 0);
   word c = payload(cls, 0);
@@ -6037,8 +6102,39 @@ defun Rt.gcAlloc(region : val, kind : val, count : val) -> val {
   // >>> QBE_WORDVAL-ONLY
   word total = 2 + countW;
   // <<< QBE_WORDVAL-ONLY
-  word cls = payload((total <= 4096) ? mknum((total + 7) / 8) : mknum(512 + (total - 4096 + 4095) / 4096), 0);
-  word phys = payload((cls <= 512) ? mknum(cls * 8) : mknum(4096 + (cls - 512) * 4096), 0);
+  // THE CLASS LADDER AND ITS BYTE SIZE, BRANCHLESS (perf U-P2 alloc-slim).
+  // These were two boxed SELECTS, and each cost the same ~20 instructions on
+  // EVERY allocation: the condition materialised as a Value in a slot, the
+  // taken arm boxed through `mknum`, the join reloaded the slot, and `payload`
+  // re-dispatched the tag to get the word back.  Both arms of each select are
+  // exact arithmetic identities over the SAME predicate, so the select becomes
+  // a mask:
+  //   total <= 4096  ->  cls = (total + 7) / 8            (the word ladder)
+  //   total >  4096  ->  cls = 512 + (total - 1) / 4096   (the page ladder)
+  // `total - 4096 + 4095` IS `total - 1`; the low arm answers at most 512 and
+  // the high arm at least 513, so the second select's `cls <= 512` is the FIRST
+  // predicate again — one compare picks both.  Both divisors are powers of
+  // two, so each is a shift.  The masked arm is computed unconditionally and
+  // multiplied by 0, which is exact (both are small positive words).
+  word small = total <= 4096;
+  word clsLo = (total + 7) / 8;
+  word clsHi = 512 + (total - 1) / 4096;
+  word cls = clsHi + small * (clsLo - clsHi);
+  word physLo = cls * 8;
+  word physHi = (cls - 511) * 4096;
+  word phys = physHi + small * (physLo - physHi);
+  // >>> QBE_WORDVAL-ONLY
+  // THE HEADER WORD, BUILT ONCE (perf U-P2 alloc-slim): Rt.kindHdr's arithmetic
+  // — the scan-kind sum, the class shift and the code shift — inlined at the
+  // allocation path's header writes, so a fresh header no longer costs a boxed
+  // `:val` CALL (which paid a whole frame: frameBlock, the memset, the root
+  // push, frame-leave) once per allocation.  `Rt.kindHdr` KEEPS its body: it is
+  // the contract's single statement, TestMain parses its rows, and the cold
+  // writers (Rt.boot, Rt.globalClosure) still call it — so this is one spelling
+  // of a number, kept in one file, with the defun as the reference.
+  word scanK = (kindW == 4) + (kindW == 6) + (kindW == 9) + (kindW == 10) + (kindW == 14);
+  word hdrW = scanK * 2 + cls * 4 + kindW * 16777216;
+  // <<< QBE_WORDVAL-ONLY
   word heapBytes = regionW->heapBytes;
   word allocated = regionW->allocated;
   regionW->kind = kindW;
@@ -6086,7 +6182,7 @@ defun Rt.gcAlloc(region : val, kind : val, count : val) -> val {
       wstore(yc1, -2, kindW * 2 + cls * 4);
       // <<< QBE_VAL-ONLY
       // >>> QBE_WORDVAL-ONLY
-      wstore(yc1, -2, payload(call Rt.kindHdr(mknum(kindW), mknum(cls)), 0));
+      wstore(yc1, -2, hdrW);
       // <<< QBE_WORDVAL-ONLY
       wstore(yc1, -1, countW);
       regionW->youngCursor = yc1 + phys * 8;
@@ -6097,7 +6193,7 @@ defun Rt.gcAlloc(region : val, kind : val, count : val) -> val {
       wstore(yc0, -2, kindW * 2 + cls * 4);
       // <<< QBE_VAL-ONLY
       // >>> QBE_WORDVAL-ONLY
-      wstore(yc0, -2, payload(call Rt.kindHdr(mknum(kindW), mknum(cls)), 0));
+      wstore(yc0, -2, hdrW);
       // <<< QBE_WORDVAL-ONLY
       wstore(yc0, -1, countW);
       regionW->youngCursor = yc0 + phys * 8;
@@ -6116,7 +6212,7 @@ defun Rt.gcAlloc(region : val, kind : val, count : val) -> val {
       wstore(cursor, -2, kindW * 2 + cls * 4);
       // <<< QBE_VAL-ONLY
       // >>> QBE_WORDVAL-ONLY
-      wstore(cursor, -2, payload(call Rt.kindHdr(mknum(kindW), mknum(cls)), 0));
+      wstore(cursor, -2, hdrW);
       // <<< QBE_WORDVAL-ONLY
       wstore(cursor, -1, countW);
       // THE BLOCK MAP IS WRITTEN ON THE BUMP PATH ONLY (GC ARC unit 2): a block
@@ -6163,7 +6259,7 @@ defun Rt.gcAlloc(region : val, kind : val, count : val) -> val {
           wstore(cursor, -2, kindW * 2 + cls * 4);
           // <<< QBE_VAL-ONLY
           // >>> QBE_WORDVAL-ONLY
-          wstore(cursor, -2, payload(call Rt.kindHdr(mknum(kindW), mknum(cls)), 0));
+          wstore(cursor, -2, hdrW);
           // <<< QBE_WORDVAL-ONLY
           wstore(cursor, -1, countW);
           bytestore(regionW->bmPtr + (cursor - regionW->heapStart) / 64, 0, 1);
@@ -6245,7 +6341,13 @@ defun Rt.gcAllocGo(region : val, cls : val) -> val {
       wstore(head, -2, kind * 2 + clsW * 4);
       // <<< QBE_VAL-ONLY
       // >>> QBE_WORDVAL-ONLY
-      wstore(head, -2, payload(call Rt.kindHdr(mknum(kind), mknum(clsW)), 0));
+      // THE SAME INLINE HEADER as gcAlloc's (perf U-P2 alloc-slim): this is the
+      // free-list POP, the other per-allocation writer, so leaving the boxed
+      // `Rt.kindHdr` call here would have kept the frame it exists to remove on
+      // every reuse.  Identical arithmetic, and `Rt.kindHdr` remains the
+      // contract's reference statement.
+      word scanK = (kind == 4) + (kind == 6) + (kind == 9) + (kind == 10) + (kind == 14);
+      wstore(head, -2, scanK * 2 + clsW * 4 + kind * 16777216);
       // <<< QBE_WORDVAL-ONLY
       wstore(head, -1, count);
       // the block start is permanent; only its STATE flips (GC ARC unit 2)
@@ -6583,7 +6685,16 @@ defun Rt.gcPromoteAlloc(cls : val, kind : val, count : val) -> val {
   word clsW = payload(cls, 0);
   word kindW = payload(kind, 0);
   word countW = payload(count, 0);
-  word phys = payload((clsW <= 512) ? mknum(clsW * 8) : mknum(4096 + (clsW - 512) * 4096), 0);
+  word physLo = clsW * 8;
+  word physHi = (clsW - 511) * 4096;
+  word phys = physHi + (clsW <= 512) * (physLo - physHi);
+  // >>> QBE_WORDVAL-ONLY
+  // THE SAME INLINE HEADER as gcAlloc's (perf U-P2 alloc-slim): every promoted
+  // object is a fresh old-space header, and this path ran the boxed
+  // `Rt.kindHdr` call once per promotion.  Identical arithmetic.
+  word scanK = (kindW == 4) + (kindW == 6) + (kindW == 9) + (kindW == 10) + (kindW == 14);
+  word hdrW = scanK * 2 + clsW * 4 + kindW * 16777216;
+  // <<< QBE_WORDVAL-ONLY
   word table = rw->classTab;
   word head = wload(table, clsW);
   if (mkbool(head != 0)) {
@@ -6592,7 +6703,7 @@ defun Rt.gcPromoteAlloc(cls : val, kind : val, count : val) -> val {
     wstore(head, -2, kindW * 2 + clsW * 4);
     // <<< QBE_VAL-ONLY
     // >>> QBE_WORDVAL-ONLY
-    wstore(head, -2, payload(call Rt.kindHdr(mknum(kindW), mknum(clsW)), 0));
+    wstore(head, -2, hdrW);
     // <<< QBE_WORDVAL-ONLY
     wstore(head, -1, countW);
     bytestore(rw->bmPtr + (head - rw->heapStart) / 64, 0, 1);
@@ -6613,7 +6724,7 @@ defun Rt.gcPromoteAlloc(cls : val, kind : val, count : val) -> val {
     wstore(cursor, -2, kindW * 2 + clsW * 4);
     // <<< QBE_VAL-ONLY
     // >>> QBE_WORDVAL-ONLY
-    wstore(cursor, -2, payload(call Rt.kindHdr(mknum(kindW), mknum(clsW)), 0));
+    wstore(cursor, -2, hdrW);
     // <<< QBE_WORDVAL-ONLY
     wstore(cursor, -1, countW);
     bytestore(rw->bmPtr + (cursor - rw->heapStart) / 64, 0, 1);
@@ -6633,7 +6744,7 @@ defun Rt.gcPromoteAlloc(cls : val, kind : val, count : val) -> val {
     wstore(cursor, -2, kindW * 2 + clsW * 4);
     // <<< QBE_VAL-ONLY
     // >>> QBE_WORDVAL-ONLY
-    wstore(cursor, -2, payload(call Rt.kindHdr(mknum(kindW), mknum(clsW)), 0));
+    wstore(cursor, -2, hdrW);
     // <<< QBE_WORDVAL-ONLY
     wstore(cursor, -1, countW);
     bytestore(rw->bmPtr + (cursor - rw->heapStart) / 64, 0, 1);
