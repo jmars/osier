@@ -39,7 +39,13 @@ need node; need cc
 rc=0
 fail() { echo "FAIL: $*" >&2; rc=1; }
 
-BIN="$(QBE_MIDGC=1 "$ROOT/tools/qbe/qbe-mk.sh" tools/qbe/fixtures/midgc-verify.elm tools/qbe/fixtures/midgc-walk.elm MidgcVerify.main "$WORK" 2>"$WORK/mk.log")" \
+# QBE_VALREP=val is PINNED, not inherited: the fixtures' .mid surfaces spell
+# inline heap cells (allocvec(14)/vecstore/mkvec) that the word arm's emitter
+# cannot lower (VR3b2: a word-arm heap cell is written by its ALLOCATOR, never
+# laid out by the emitter) — on the default (word) arm the probe dies at the
+# fixture BUILD, before any invariant runs.  The collector invariants this
+# probe names are arm-shared; the val arm builds them and runs all 8 controls.
+BIN="$(QBE_MIDGC=1 QBE_VALREP=val "$ROOT/tools/qbe/qbe-mk.sh" tools/qbe/fixtures/midgc-verify.elm tools/qbe/fixtures/midgc-walk.elm MidgcVerify.main "$WORK" 2>"$WORK/mk.log")" \
   || { echo "probe-midgc-verify: qbe-mk failed" >&2; cat "$WORK/mk.log" >&2; exit 1; }
 
 # run <mode> [extra env...] — stdout to $WORK/out, stderr to $WORK/err, status

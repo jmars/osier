@@ -65,15 +65,18 @@ MANIFEST="$(ELM_GATE_MANIFEST_ONLY=1 "$GATE" 2>/dev/null)" || {
 # (the output file the manifest names is IGNORED — every .ssa goes to scratch,
 # so nothing can clobber a committed artifact; see the stage-4 lesson).
 #
-# THE PLAN IS NOT ONE LINE PER ARTIFACT: the gate can register the same output
-# twice (sub.elm is registered twice today), so the plan carries 160 emissions
-# over 159 unique names and the second emit OVERWRITES the first.  Harmless here
-# (both emissions are of the same group, so the hash is the same either way) but
-# it matters for anyone reproducing an enumeration: "re-emit all 159" is really
-# 160 emissions, and counting the emissions is not counting the artifacts.
+# THE PLAN IS DEDUPED BY NAME: the gate can register the same output twice
+# (sub.elm is registered twice today), and under -P the two identical emissions
+# of one name write the SAME scratch path concurrently — MEASURED (2026-11-22,
+# U-P1's gate runs): two of five corpus runs died with "sub produced NO output"
+# when the duplicate emissions collided.  Both emissions are of the same group
+# (identical bytes either way), so dropping the duplicate changes no artifact —
+# it only stops two writers racing on one file.  For anyone reproducing an
+# enumeration: the raw manifest still holds 160 registrations over 159 unique
+# names; counting registrations is not counting artifacts.
 jq -r '.groups[] | [(.output | split("/")[-1] | sub("\\.(csexp|ssa)$"; "")),
                    (.sources | join(" ")), .entry] | join("|")' \
-  "$MANIFEST" > "$WORK/plan.tsv"
+  "$MANIFEST" | awk '!seen[$1]++' > "$WORK/plan.tsv"
 [ -s "$WORK/plan.tsv" ] || { echo "osier-corpus-ssa: empty plan" >&2; exit 2; }
 
 # ---- one QBE emit per group, in parallel ----
