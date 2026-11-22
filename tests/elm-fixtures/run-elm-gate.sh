@@ -999,6 +999,42 @@ intproc boxfloat boxaddint 0 "2305843009213693953" ""
 # already reds at rc 0 by falling through `@fixbox_*`.
 intproc boxfloat boxnegint 0 "-2305843009213693952" ""
 
+# THE OPERAND END OF THE SEAT WITH A NEGATIVE BODY (`boxnegbox`):
+# (-(2^60+1)) + (-(2^60+1)) = -(2^61+2) = -2305843009213693954.  The row above
+# feeds the result-end re-box from FIXNUM operands; this one is the remaining
+# one-liner AREA4-BOXING.md named after those two landed — each operand is
+# itself outside the fixnum range on the NEGATIVE side, so `Rt.boxInt` runs on
+# the OPERAND side with a negative body as well as on the result side.
+#
+# WHY -(2^60+1) BOXES AND -2^60 DOES NOT.  The bound is `-2^60 <= n < 2^60`,
+# so one more in magnitude than `bigneg` is out: MEASURED, same fixture, the
+# two literals emit differently — `q_Boxfloat_x2ebigneg` ends `%t5 =l shl
+# %t4, 3` (tagged fixnum, no call), `q_Boxfloat_x2ebignegodd` ends
+# `%t5 =:val call $q_Rt_x2eboxInt(l %t4)`.
+#
+# THE .SSA DIFFERENTIAL, MEASURED: the same boxfloat.elm compiled with entry
+# `Boxfloat.boxnegbox` has 964 `call $q_Rt_x2eboxInt`; with entry
+# `Boxfloat.boxnegint` it has 963 — the one extra call is `bignegodd`'s
+# operand-end box, and `boxnegint`'s emit has no `bignegodd` at all.  So the
+# +1 is this row's operand end and not a count that drifts with the entry.
+#
+# RESULT END: the operands arrive as tag-1 cells, `Rt.+`'s int arm takes
+# `@pheap_*` on both (`%t84 =l and %t74, -8` then `%t82 =l loadl %t85`), adds
+# to the negative sum, the `shl`/`sar`/`ceql` round trip fails, and
+# `@fixbox_34` does `%t90 =:val call $q_Rt_x2eboxInt(l %t86)` on that negative
+# body.
+#
+# THE VAL ARM IS THE ORACLE: with `QBE_VALREP=val` the same fixture emits ZERO
+# `q_Rt_x2eboxInt` (rg exit 1 over the whole .ssa), the literal is a plain i64
+# in a 40-byte Value's payload (`storel %t5, %t0`), and the add is inlined as
+# two payload loads and an `add`.  Same printed -2305843009213693954, by a
+# different route.
+#
+# FAIL-ABILITY: dropping the expectation's leading `-` reds it with the
+# printed value in the diff at rc 0 (MEASURED, see the unit's record) — the
+# silent-wrong-answer signature this row exists to catch.
+intproc boxfloat boxnegbox 0 "-2305843009213693954" ""
+
 # ==================== L1: the `^` operator ====================
 # `^` was already in the parser (Elm's precedence 8, right-associative); what did
 # not exist was a checker row, a lowering row and a runtime prim, so every `^`

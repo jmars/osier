@@ -19,8 +19,8 @@ The dump it is rendered from (no elm/node/jq needed in that mode):
 ELM_GATE_MATRIX=/tmp/matrix.tsv tests/elm-fixtures/run-elm-gate.sh
 ```
 
-**195 registered checks.** Run from the repo root, the gate prints
-`PASS=195 FAIL=0` on the frozen artifact. `docs/research/osier-paper.md`
+**196 registered checks.** Run from the repo root, the gate prints
+`PASS=196 FAIL=0` on the frozen artifact. `docs/research/osier-paper.md`
 **Appendix A** is the paper's prose counterpart: the *designed* programs the
 paper cites, with the claim each one pins. Appendix A is a selected subset;
 this file is the complete registry. Where the two disagree, **this file and the
@@ -246,11 +246,12 @@ fails loudly rather than letting this listing go stale.
 | 188 | `boxfloat` | `intproc` | `boxbigsum` | `0\|11152921504606847000.0\|` | — | — | `boxfloat.elm` |
 | 189 | `boxfloat` | `intproc` | `boxaddint` | `0\|2305843009213693953\|` | — | — | `boxfloat.elm` |
 | 190 | `boxfloat` | `intproc` | `boxnegint` | `0\|-2305843009213693952\|` | — | — | `boxfloat.elm` |
-| 191 | `intpow` | `intproc` | `powsmall` | `0\|1024\|` | — | — | `intpow.elm` |
-| 192 | `intpow` | `intproc` | `powzero` | `0\|1\|` | — | — | `intpow.elm` |
-| 193 | `intpow` | `intproc` | `powwrap` | `0\|0\|` | — | — | `intpow.elm` |
-| 194 | `intpow` | `intproc` | `powbig` | `0\|4052555153018976267\|` | — | — | `intpow.elm` |
-| 195 | `intpow` | `intproc` | `powneg` | `1\|\|qbe-rt: negative exponent: `^` requires an exponent >= 0` | `1` | — | `intpow.elm` |
+| 191 | `boxfloat` | `intproc` | `boxnegbox` | `0\|-2305843009213693954\|` | — | — | `boxfloat.elm` |
+| 192 | `intpow` | `intproc` | `powsmall` | `0\|1024\|` | — | — | `intpow.elm` |
+| 193 | `intpow` | `intproc` | `powzero` | `0\|1\|` | — | — | `intpow.elm` |
+| 194 | `intpow` | `intproc` | `powwrap` | `0\|0\|` | — | — | `intpow.elm` |
+| 195 | `intpow` | `intproc` | `powbig` | `0\|4052555153018976267\|` | — | — | `intpow.elm` |
+| 196 | `intpow` | `intproc` | `powneg` | `1\|\|qbe-rt: negative exponent: `^` requires an exponent >= 0` | `1` | — | `intpow.elm` |
 
 ---
-Generated from `tests/elm-fixtures/run-elm-gate.sh`; 195 checks.
+Generated from `tests/elm-fixtures/run-elm-gate.sh`; 196 checks.

@@ -1,4 +1,4 @@
-module Boxfloat exposing (boxadd, boxaddint, boxaddrev, boxbigsum, boxnegint)
+module Boxfloat exposing (boxadd, boxaddint, boxaddrev, boxbigsum, boxnegbox, boxnegint)
 
 -- AREA 4 FOLLOW-UP — THE BOXED-INT x FLOAT READER PAIR (design doc
 -- AREA4-BOXING.md §4 recommendation 2 and the §6 "unpinned" risk).
@@ -138,3 +138,26 @@ boxes the result a second time with a NEGATIVE body.
 boxnegint : Int
 boxnegint =
     bigneg + bigneg
+
+
+{-| -(2^60 + 1) — the NEGATIVE operand that BOXES.  The bound is
+`-2^60 <= n < 2^60`, so `-2^60` (bigneg, above) is still a fixnum while one
+more in magnitude is not: this literal goes through `Rt.boxInt` exactly as its
+positive twin `bigodd` does, unlike `bigneg`.  MEASURED in the emit:
+`q_Boxfloat_x2ebignegodd` ends `call $q_Rt_x2eboxInt`.
+-}
+bignegodd : Int
+bignegodd =
+    -1152921504606846977
+
+
+{-| (f) THE OPERAND-END SEAT WITH A NEGATIVE BODY: boxed + boxed, where each
+operand is the NEGATIVE out-of-range literal -(2^60 + 1) and the sum
+(-2305843009213693954 = -(2^61 + 2)) re-boxes again.  `boxnegint` next door
+feeds the same result-end seat from FIXNUM operands, so the two rows pin the
+two operand shapes separately; only this one has `Rt.boxInt` on the operand
+side with a negative body.
+-}
+boxnegbox : Int
+boxnegbox =
+    bignegodd + bignegodd
