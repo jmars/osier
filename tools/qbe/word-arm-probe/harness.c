@@ -71,8 +71,15 @@ static long *g_frame;
 long *q_Rt_x2eframe_x2denter(long nslots)
 {
     size_t n = (size_t)nslots * 8;
-    g_frame = calloc(1, n + 64);
-    return g_frame;
+    /* U-P3 (perf live-zero): a word-arm defun's prologue computes %lp = %f - 40
+     * and stores its live count there before every safepoint-reaching call —
+     * the FrameHdr the REAL frameBlock callocs ahead of the slot area.  The
+     * stub must model the header or those stores write 40 bytes PAST the start
+     * of this buffer (MEASURED: the str/payload probes died rc=139 on exactly
+     * that).  Nothing in a probe reads the header back, so its contents can
+     * stay zero; it only needs to be ADDRESSABLE. */
+    g_frame = calloc(1, n + 64 + 40);
+    return g_frame + 5;
 }
 void q_Rt_x2eframe_x2dleave(void) { }
 

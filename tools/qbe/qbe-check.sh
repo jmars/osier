@@ -1127,9 +1127,20 @@ frame_wordcond_pin() {
     ok=1
     if [ "$arm" = val ] && [ "$fb3" -ne 0 ]; then echo "FAIL frame-wordcond(val): frameBlock still boxes a cond (storew 3 x $fb3)"; ok=0; fi
     if [ "$fb_i" -gt "$bound" ]; then echo "FAIL frame-wordcond($arm): frameBlock instruction count $fb_i > $bound"; ok=0; fi
-    if [ "$fe_memset" -ne 1 ]; then echo "FAIL frame-wordcond($arm): frame-enter does not bulk-zero with exactly ONE memset call (found $fe_memset)"; ok=0; fi
+    # U-P3 (perf live-zero) split the zeroing by arm: the VAL arm keeps P1e's
+    # ONE bulk memset (a val slot is written tag-word-then-payload, so no single
+    # store can mark it covered), while the WORD arm deleted the memset entirely
+    # — frame-enter roots live=0 and Lower bumps the live count before every
+    # safepoint-reaching call instead.  The pin follows the contract, per arm.
+    if [ "$arm" = val ] && [ "$fe_memset" -ne 1 ]; then echo "FAIL frame-wordcond(val): frame-enter does not bulk-zero with exactly ONE memset call (found $fe_memset)"; ok=0; fi
+    if [ "$arm" = word ] && [ "$fe_memset" -ne 0 ]; then echo "FAIL frame-wordcond(word): frame-enter still bulk-zeroes with $fe_memset memset call(s) — U-P3 deleted the word arm's zeroing for per-safepoint live bumps"; ok=0; fi
+    if [ "$arm" = word ] && ! printf '%s\n' "$fe" | grep -q 'storel 0'; then echo "FAIL frame-wordcond(word): frame-enter no longer stores live=0 (the root's initial live count) before the root push"; ok=0; fi
     if [ "$ok" -eq 1 ]; then
-      echo "PASS frame-wordcond($arm): frameBlock $fb_i instructions (bound $bound), storew-3 x $fb3, and frame-enter bulk-zeroes with one memset call"
+      if [ "$arm" = val ]; then
+        echo "PASS frame-wordcond($arm): frameBlock $fb_i instructions (bound $bound), storew-3 x $fb3, and frame-enter bulk-zeroes with one memset call"
+      else
+        echo "PASS frame-wordcond($arm): frameBlock $fb_i instructions (bound $bound), storew-3 x $fb3, and frame-enter roots live=0 with NO memset (U-P3 per-safepoint live bumps)"
+      fi
     else
       bad=1
     fi

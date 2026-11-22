@@ -2665,14 +2665,23 @@ checks rt rawMidText =
             Err _ ->
                 False
         )
-    , check "P1e zero-BEFORE-root: frame-enter's memset is emitted BEFORE the Rt.rootPushValueArray call (a reused block's stale slots must be zeroed before the GC scans them — the rt.zig:279 correctness memset)"
-        (case QbeLower.lower rt False False False True True True True False False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.frame-enter" of
-            Ok mod ->
-                case funcByName "q_Rt_x2eframe_x2denter" mod of
-                    Just f ->
-                        memsetBeforeRootPush f
+    , check "U-P3 zero-BEFORE-root, RE-AIMED at the live-coverage contract (word arm): frame-enter emits NO memset and writes the frame's live count to ZERO before the Rt.rootPushValueArray call (so nothing is covered before the body stores it), and a PFrame body defines %lp and bumps it before its calls. P1e's row keyed on the memset-then-push ORDER; the zeroth thing a reused block must not do now is cover an unwritten slot. DELETING the `hdr->live = 0` store turns this RED (the live=0 store is the only `storel 0` in frame-enter), and so does re-adding the memset"
+        (case Rt.loadArm True rawMidText of
+            Ok wordRt ->
+                case
+                    ( QbeLower.lowerWith RtLayout.wordLayout wordRt False False False True True True True False False True QbeTypes.empty (rtArities (driverProg wordRt)) (driverProg wordRt) "Rt.frame-enter"
+                    , QbeLower.lowerWith RtLayout.wordLayout wordRt False False False True True True True False False True QbeTypes.empty (rtArities [ recBuildProbe ]) [ recBuildProbe ] "Rc.l"
+                    )
+                of
+                    ( Ok modEnter, Ok modProbe ) ->
+                        case ( funcByName "q_Rt_x2eframe_x2denter" modEnter, funcByName "q_Rc_x2el" modProbe ) of
+                            ( Just ent, Just probe ) ->
+                                zeroBeforeRootPush ent && liveBumpedProbe probe
 
-                    Nothing ->
+                            _ ->
+                                False
+
+                    _ ->
                         False
 
             Err _ ->
@@ -3163,7 +3172,7 @@ checks rt rawMidText =
                     -- runtime's interned symbol is a 1-word code-2 block, so a
                     -- 2-word literal would be a different shape for the same
                     -- construct.
-                    && String.contains "storel 8, %s4\n\t%t0 =:val call $q_Rt_x2eallocSym(l %s4, l %s4, l %s4, w 1)\n" wTxt
+                    && String.contains "storel 8, %s4\n\tstorel 5, %lp\n\t%t0 =:val call $q_Rt_x2eallocSym(l %s4, l %s4, l %s4, w 1)\n" wTxt
                     && String.contains "\t%t5 =l add %t4, 0\n\tstorel $d1, %t5\n" wTxt
                     && String.contains "\t%t6 =l or %t4, 1\n" wTxt
                     && not (String.contains "=l add %t4, 8" wTxt)
@@ -3228,20 +3237,34 @@ checks rt rawMidText =
             _ ->
                 False
         )
-    , check "VR3c AREA 4 — THE FRAME SITES FLIP AND THE HEADER DOES NOT: frameBlock's block is `40 + 8*nslots` and frame-enter's memset is `8*nslots` on the word arm (`40 + 40*nslots` / `40*nslots` on the val arm), while the 40-byte header, `base = hdr + 40` and the `nslots`-indexed pool are asserted IDENTICAL in both texts — the P8 invariant (an alloc8 block, 5 header words, no anchor words). The slot size and the header size are the LAYOUT's: 8 == `wordLayout.valSizeBytes` and 40 == 5 * `wordBytes`. The exec-plan blob and the printer are deliberately NOT twinned (their stride is the .mid front end's 40-byte `val`, which no knob moves, and the printer has no stride at all), and the runtime carries that list so the next unit cannot 'finish' the port into a silent overrun"
+    , check "VR3c AREA 4 — THE FRAME SITES FLIP AND THE HEADER DOES NOT: frameBlock's block is `40 + 8*nslots` and frame-enter's bulk zero is `40*nslots` on the val arm ONLY (U-P3 deleted the word arm's `8*nslots` memset: its live count is bumped per safepoint instead), while the 40-byte header, `base = hdr + 40` and the `nslots`-indexed pool are asserted IDENTICAL in both texts — the P8 invariant (an alloc8 block, 5 header words, no anchor words). The slot size and the header size are the LAYOUT's: 8 == `wordLayout.valSizeBytes` and 40 == 5 * `wordBytes`. The exec-plan blob and the printer are deliberately NOT twinned (their stride is the .mid front end's 40-byte `val`, which no knob moves, and the printer has no stride at all), and the runtime carries that list so the next unit cannot 'finish' the port into a silent overrun"
         (case ( Rt.spliceArm False rawMidText, Rt.spliceArm True rawMidText ) of
             ( Ok valText, Ok wordText ) ->
                 String.contains "word bytes = 40 + 40 * nslots;" valText
                     && String.contains "rawcall memset(base, 0, 40 * nslots);" valText
+                    && String.contains "hdr->live = nslots;" valText
                     && not (String.contains "40 + 8 * nslots" valText)
                     && String.contains "word bytes = 40 + 8 * nslots;" wordText
-                    && String.contains "rawcall memset(base, 0, 8 * nslots);" wordText
+                    -- U-P3: the word arm's bulk zero is GONE (Lower bumps the
+                    -- scan count instead) and `live` enters at 0; the val arm
+                    -- keeps both (a val slot is written word by word, so no
+                    -- single store marks it covered).
+                    && not (String.contains "rawcall memset(base, 0, 8 * nslots);" wordText)
+                    && String.contains "hdr->live = 0;" wordText
+                    && not (String.contains "hdr->live = nslots;" wordText)
                     && not (String.contains "40 + 40 * nslots" wordText)
                     -- the header does NOT move: the same two lines in both arms
                     && String.contains "word base = [word](hdr) + 40;" valText
                     && String.contains "word base = [word](hdr) + 40;" wordText
                     && String.contains "wstore(g, 16 + nslots, h->freeNext);" valText
                     && String.contains "wstore(g, 16 + nslots, h->freeNext);" wordText
+                    -- U-P3: header slot 4 carries the frame's SIZE on BOTH arms
+                    -- (slot 0 is a bumping live count on the word arm, and the
+                    -- pool bucket is keyed by size), and frame-leave reads it.
+                    && String.contains "hdr->_pad = nslots;" valText
+                    && String.contains "hdr->_pad = nslots;" wordText
+                    && String.contains "word n = hdr->_pad;" valText
+                    && String.contains "word n = hdr->_pad;" wordText
                     -- the numbers ARE the layout's
                     && RtLayout.wordLayout.valSizeBytes
                     == 8
@@ -17388,13 +17411,15 @@ memsetBulkZeroShape f =
         && not (callsSym "q_Rt_x2eframeZero" f)
 
 
-{-| P1e zero-BEFORE-root: in frame-enter's straight-line body the bulk-zero
-`memset` is emitted before `q_Rt_x2erootPushValueArray`.  The correctness order
-from rt.zig:279 — a reused block's stale slots must be zeroed before the GC
-can scan them, or scanValue chases freed pages.
+{-| U-P3 zero-BEFORE-root (word arm): frame-enter's body must contain NO
+`memset` at all - the block is not bulk-zeroed any more, the body bumps the scan
+count instead - and it must write the live count ZERO before
+`q_Rt_x2erootPushValueArray`, i.e. no slot is covered when the frame is
+registered.  The `hdr->live = 0` store is the only `storel 0` in the defun, so
+deleting it (or restoring the memset) turns this False.
 -}
-memsetBeforeRootPush : Il.Func -> Bool
-memsetBeforeRootPush f =
+zeroBeforeRootPush : Il.Func -> Bool
+zeroBeforeRootPush f =
     let
         insts =
             List.concatMap (\b -> b.body) f.blocks
@@ -17403,6 +17428,14 @@ memsetBeforeRootPush f =
             case i of
                 Il.Call _ _ (Il.Sym s) _ ->
                     s == sym
+
+                _ ->
+                    False
+
+        isZero i =
+            case i of
+                Il.Store Il.StoreL (Il.Con 0) _ ->
+                    True
 
                 _ ->
                     False
@@ -17420,12 +17453,44 @@ memsetBeforeRootPush f =
                     (List.indexedMap Tuple.pair insts)
                 )
     in
-    case ( first (isSym "memset"), first (isSym "q_Rt_x2erootPushValueArray") ) of
-        ( Just m, Just p ) ->
-            m < p
+    (not (List.any (isSym "memset") insts))
+        && (case ( first isZero, first (isSym "q_Rt_x2erootPushValueArray") ) of
+                ( Just z, Just p ) ->
+                    z < p
 
-        _ ->
-            False
+                _ ->
+                    False
+           )
+
+
+{-| U-P3, the other half: a PFrame word-arm body defines the header's live
+pointer (`%lp = %f - 40`) in its prologue and stores a bump into it.  This is the
+half that makes the live=0 above sound - without it every bump would be a missed
+slot, which is the stale-pointer class this unit is gated on.
+-}
+liveBumpedProbe : Il.Func -> Bool
+liveBumpedProbe f =
+    let
+        insts =
+            List.concatMap (\b -> b.body) f.blocks
+
+        isDef i =
+            case i of
+                Il.Bin (Just "lp") Il.L Il.Sub (Il.Tmp "f") (Il.Con 40) ->
+                    True
+
+                _ ->
+                    False
+
+        isBump i =
+            case i of
+                Il.Store Il.StoreL (Il.Con _) (Il.Tmp "lp") ->
+                    True
+
+                _ ->
+                    False
+    in
+    List.any isDef insts && List.any isBump insts
 
 
 {-| The RawCallAgg IL shape: a call with a result temp, an `:ret` aggregate

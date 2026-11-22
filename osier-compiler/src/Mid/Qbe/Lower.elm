@@ -13969,15 +13969,442 @@ withPrologue layout pending =
                 _ ->
                     []
 
+        -- ================= perf U-P3 "live-zero" (Lower's half) =================
+        -- THE FRAME'S LIVE COUNT IS BUMPED HERE, ONE STATIC STORE PER CALL SITE.
+        -- The runtime's half is frame-enter's word arm: it no longer memsets the
+        -- block and it enters with `live = 0` (runtime.mid, the U-P3 NOTE above
+        -- frameBlock).  So a kind-2 scan of the frame covers only the slots this
+        -- pass has bumped, and everything below a bump must already hold a
+        -- GC-safe word.  Two obligations follow, and both are emitted here:
+        --
+        --  (a) THE BUMP.  Before every instruction that can reach a safepoint
+        --      (`isCallInst` — see the CONSERVATIVE SET note below), store
+        --      `L = 1 + (highest slot that definitely holds a Value)` into the
+        --      header's live word.  `%lp` is `%f - 40`, the header's slot 0.
+        --  (b) THE ENTER-SIDE ZEROING.  Coverage is a PREFIX, so a slot below L
+        --      that has NOT been written is covered with whatever the reused
+        --      block holds — the qbe-gcbug class.  Every such slot is zeroed
+        --      ONCE, in the prologue (before the param blits, so nothing this
+        --      pass zeroes can clobber a Value), with one 8-byte store.  The set
+        --      is computed from the same fixpoint the bumps are.
+        --
+        -- WHY THE ZEROING IS NOT LAZY, i.e. why the gaps cannot be filled at
+        -- the site that covers them: a slot that is not definitely written at a
+        -- site IS written on some path (that is what "not definite" means), so
+        -- a store at the site would clobber a live Value on that path — and in
+        -- a loop it would clobber the previous iteration's.  Enter is the only
+        -- point where "unwritten" is guaranteed on every path.
+        --
+        -- CONSERVATIVE SET: every `Call` is a safepoint.  Mid.Rt.allocating
+        -- could exclude the non-collecting callees, and Liveness.allocCapable
+        -- does exactly that for the frame-free decision — but a MISSED site here
+        -- is a stale pointer after promotion (silent-wrong, and the reason this
+        -- unit is review-gated), while an extra site costs one store the
+        -- skip rule below usually elides.  A `tcall` is NOT a site: on the word
+        -- arm the emitted order is args -> frame-leave -> tcall, so a store
+        -- there would write into a frame that has already gone back to the
+        -- pool, and nothing can collect between the last bump and the jump.
+        liveBumpArm =
+            case pending.pro of
+                PFrame ->
+                    wordArmLayout layout
+
+                _ ->
+                    False
+
+        -- The slots the PROLOGUE itself writes (param blits, capture blits and
+        -- the PLeaf result zero) are written before any body instruction, so the
+        -- fixpoint starts from them.  Read off the emitted instructions rather
+        -- than from nparams/ncaps, so an ABI variant that skips a blit cannot
+        -- desynchronise the seed from the code.
+        slotNames =
+            Dict.fromList (List.map (\k -> ( slotTmp k, k )) (List.range 0 (pending.nslots - 1)))
+
+        prologueWritten =
+            Set.fromList
+                (List.filterMap (fullSlotWrite slotNames layout.valSizeBytes) (leafTailZero ++ paramBlits ++ capBlitsPro))
+
+        ( bumped, zeroSlots ) =
+            if liveBumpArm then
+                liveBumpPass
+                    { valBytes = layout.valSizeBytes
+                    , nslots = pending.nslots
+                    , seed = prologueWritten
+                    , slots = slotNames
+                    }
+                    pending.func.blocks
+
+            else
+                ( pending.func.blocks, [] )
+
+        livePtrDef =
+            if liveBumpArm then
+                [ Bin (Just livePtrTmp) L Sub (Il.Tmp "f") (Il.Con liveFieldBack) ]
+
+            else
+                []
+
+        zeroStores =
+            List.map (\k -> Store StoreL (Il.Con 0) (Il.Tmp (slotTmp k))) zeroSlots
+
         prologue =
-            case f.blocks of
+            case bumped of
                 b0 :: rest ->
-                    { b0 | body = enter :: slotDefs ++ leafTailZero ++ paramBlits ++ capBlitsPro ++ b0.body } :: rest
+                    { b0
+                        | body =
+                            enter
+                                :: slotDefs
+                                ++ livePtrDef
+                                ++ zeroStores
+                                ++ leafTailZero
+                                ++ paramBlits
+                                ++ capBlitsPro
+                                ++ b0.body
+                    }
+                        :: rest
 
                 [] ->
                     []
     in
     { f | blocks = prologue }
+
+
+-- ==================== U-P3's LIVE-BUMP ANALYSIS ====================
+-- The header's live word, as a byte offset BACK from the frame base `%f`:
+-- `base = hdr + 40` and live is header slot 0 (runtime.mid's FrameHdr table),
+-- so `%lp = %f - 40` is its address on both arms.
+liveFieldBack : Int
+liveFieldBack =
+    40
+
+
+-- The temp holding that address, for the whole body.
+livePtrTmp : String
+livePtrTmp =
+    "lp"
+
+
+-- A FULL-width Value store into a slot — the only thing that makes a slot
+-- covered.  The word arm's Value IS one 8-byte word, so StoreL/StoreD/blit(8)
+-- all qualify; a `storew` does NOT (it writes the low 4 bytes of the tag word,
+-- which on this arm is half a Value — the trap U-P3's brief names, and the
+-- reason this predicate is not "any store to the slot").
+--
+-- The slot is recognised by its ADDRESS TEMP (`%s<i>`, withPrologue's
+-- slotDefs): every interior address is a further Add off one of those, so only
+-- a BARE `%s<i>` operand is a slot write.  The map is built from nslots rather
+-- than parsed out of the name — the subset has no String.toInt.
+fullSlotWrite : Dict String Int -> Int -> Inst -> Maybe Int
+fullSlotWrite slots valBytes inst =
+    case inst of
+        Store StoreL _ (Il.Tmp a) ->
+            Dict.get a slots
+
+        Store StoreD _ (Il.Tmp a) ->
+            Dict.get a slots
+
+        Blit _ (Il.Tmp a) n ->
+            if n >= valBytes then
+                Dict.get a slots
+
+            else
+                Nothing
+
+        _ ->
+            Nothing
+
+
+isCallInst : Inst -> Bool
+isCallInst inst =
+    case inst of
+        Call _ _ _ _ ->
+            True
+
+        _ ->
+            False
+
+
+-- 1 + the highest slot that definitely holds a Value, or 0 for none.  (The
+-- subset's Set has no `maximum`, so the fold carries the answer.)
+bumpOf : Set Int -> Int
+bumpOf st =
+    Set.foldl (\k acc -> if k >= acc then k + 1 else acc) 0 st
+
+
+-- THE CONVERGENCE TEST, AS A WEIGHT AND NOT AS `==`.  Every step of this
+-- dataflow SHRINKS (a block's state is an intersection of its predecessors' and
+-- a set of fixed writes, so it can only lose slots), which makes "the sum of the
+-- slot counts plus the stored values" a measure that strictly decreases whenever
+-- anything changed — so an unchanged weight IS the fixpoint.  It is spelled this
+-- way because `==` on a Dict of Sets is a deep structural compare that no
+-- selfhost path exercises: MERGED into this unit's first staged driver, the
+-- word-arm build of the compiler reached a Mid prim's HALT arm on it (a
+-- pre-existing word-arm gap in a prim nothing else calls).
+stateWeight : Dict String ( Set Int, Int ) -> Int
+stateWeight states =
+    Dict.foldl (\_ sl acc -> acc + Set.size (Tuple.first sl) + Tuple.second sl) 0 states
+
+
+-- THE MUST-MERGE, BY HAND.  `Set.intersect` is core-libs' `Dict.filter`, and
+-- NO selfhost path exercises that primitive: MERGED into this unit's first
+-- staged driver, the word-arm build of the compiler reached a Mid prim's HALT
+-- arm inside it (a pre-existing word-arm gap in a prim nothing calls, which is
+-- a finding of its own).  Set.member/insert/foldl are all exercised, so the
+-- intersection is spelled with those.
+keepBoth : Set Int -> Set Int -> Set Int
+keepBoth a b =
+    Set.foldl (\k acc -> if Set.member k b then Set.insert k acc else acc) Set.empty a
+
+
+type alias LiveBumpOpts =
+    { valBytes : Int
+    , nslots : Int
+    , seed : Set Int
+    , slots : Dict String Int
+    }
+
+
+{-| Rewrite one PFrame word-arm body into the U-P3 shape: a `storel L, %lp`
+before every call, and the enter-side zero list.  The analysis is a forward
+MUST dataflow over the block CFG — the state is `(slots that definitely hold a
+Value, the live count already established on every path)`, the merge is
+(intersection, min), and the entry block starts from the prologue's writes with
+nothing stored.  A block with no predecessor starts EMPTY (not from the top):
+unreachable code is then analysed as if nothing were written, which covers
+nothing it should not.
+
+The iteration is a decreasing chain on a finite lattice, so it terminates: each
+round either stabilises or strictly shrinks one block's state, and the total
+shrinkage is bounded by `blocks * (nslots + 1)`, which is the fuel.
+
+-}
+liveBumpPass : LiveBumpOpts -> List Block -> ( List Block, List Int )
+liveBumpPass opts blocks =
+    let
+        labels =
+            List.map .label blocks
+
+        succOf b =
+            case b.jump of
+                Jmp l ->
+                    [ l ]
+
+                Jnz _ t f ->
+                    [ t, f ]
+
+                Fallthrough ->
+                    nextLabel labels b.label
+
+                Ret _ ->
+                    []
+
+                Hlt ->
+                    []
+
+        preds =
+            List.foldl
+                (\b acc ->
+                    List.foldl
+                        (\s acc2 ->
+                            Dict.insert s
+                                (b.label :: Maybe.withDefault [] (Dict.get s acc2))
+                                acc2
+                        )
+                        acc
+                        (succOf b)
+                )
+                (Dict.fromList (List.map (\b -> ( b.label, [] )) blocks))
+                blocks
+
+        firstLabel =
+            case blocks of
+                b :: _ ->
+                    b.label
+
+                [] ->
+                    ""
+
+        top =
+            Set.fromList (List.range 0 (opts.nslots - 1))
+
+        -- one block's transfer: bump before every call, then record the writes
+        transfer ( st, ln ) body =
+            List.foldl
+                (\i ( s0, l0 ) ->
+                    let
+                        ( s1, l1 ) =
+                            if isCallInst i then
+                                let
+                                    b =
+                                        bumpOf s0
+                                in
+                                if b > l0 then
+                                    ( s0, b )
+
+                                else
+                                    ( s0, l0 )
+
+                            else
+                                ( s0, l0 )
+                    in
+                    case fullSlotWrite opts.slots opts.valBytes i of
+                        Just k ->
+                            ( Set.insert k s1, l1 )
+
+                        Nothing ->
+                            ( s1, l1 )
+                )
+                ( st, ln )
+                body
+
+        inStateOf st lbl =
+            if lbl == firstLabel then
+                ( opts.seed, 0 )
+
+            else
+                case Maybe.withDefault [] (Dict.get lbl preds) of
+                    [] ->
+                        ( Set.empty, 0 )
+
+                    ps ->
+                        List.foldl
+                            (\p ( sa, la ) ->
+                                case Dict.get p st of
+                                    Just sl ->
+                                        let
+                                            ( s, l ) =
+                                                sl
+                                        in
+                                        ( keepBoth sa s, min la l )
+
+                                    Nothing ->
+                                        ( sa, la )
+                            )
+                            ( top, opts.nslots + 1 )
+                            ps
+
+        -- ONE SWEEP IN EMISSION ORDER, updating in place (Gauss-Seidel): a
+        -- block's successor reads the block's NEW state in the same sweep, so a
+        -- straight-line chain converges in one pass instead of one hop per pass.
+        -- The order is the emission order, which is the flow order, so only back
+        -- edges (the self-tail loop) need another sweep.
+        sweep sts =
+            List.foldl
+                (\b acc -> Dict.insert b.label (transfer (inStateOf acc b.label) b.body) acc)
+                sts
+                blocks
+
+        settle fuel sts =
+            if fuel <= 0 then
+                sts
+
+            else
+                let
+                    next =
+                        sweep sts
+                in
+                if stateWeight next == stateWeight sts then
+                    sts
+
+                else
+                    settle (fuel - 1) next
+
+        states =
+            if List.any (\b -> List.any isCallInst b.body) blocks then
+                settle
+                    ((List.length blocks + 1) * (opts.nslots + 2) + 8)
+                    (Dict.fromList (List.map (\b -> ( b.label, ( top, opts.nslots + 1 ) )) blocks))
+
+            else
+                -- NO CALL, NO SAFEPOINT, nothing to bump: the common case for a
+                -- leaf defun, and the reason this pass costs nothing on one.
+                Dict.fromList (List.map (\b -> ( b.label, ( Set.empty, 0 ) )) blocks)
+
+        -- the emitted pass: identical decisions to `transfer`, plus the body.
+        -- The accumulator is a RECORD, not a tuple: the subset's pattern support
+        -- is flat tuples only (a nested tuple pattern parses and then reads the
+        -- wrong lanes — MEASURED as a segfault in the staged bootstrap driver).
+        emitIn st0 ln0 body =
+            let
+                step i acc =
+                    let
+                        s0 =
+                            acc.written
+
+                        l0 =
+                            acc.stored
+
+                        b =
+                            if isCallInst i then
+                                bumpOf s0
+
+                            else
+                                l0
+
+                        emits =
+                            isCallInst i && b > l0
+
+                        acc1 =
+                            if emits then
+                                { acc
+                                    | insts = Store StoreL (Il.Con b) (Il.Tmp livePtrTmp) :: acc.insts
+                                    , stored = b
+                                    , zeros = List.filter (\k -> not (Set.member k s0)) (List.range 0 (b - 1)) ++ acc.zeros
+                                }
+
+                            else
+                                acc
+
+                        acc2 =
+                            case fullSlotWrite opts.slots opts.valBytes i of
+                                Just k ->
+                                    { acc1 | written = Set.insert k acc1.written }
+
+                                Nothing ->
+                                    acc1
+                    in
+                    { acc2 | insts = i :: acc2.insts }
+            in
+            List.foldl step { insts = [], written = st0, stored = ln0, zeros = [] } body
+
+        walked =
+            List.map
+                (\b ->
+                    let
+                        ( st0, ln0 ) =
+                            inStateOf states b.label
+
+                        done =
+                            emitIn st0 ln0 b.body
+                    in
+                    ( { b | body = List.reverse done.insts }, done.zeros )
+                )
+                blocks
+    in
+    ( List.map Tuple.first walked
+    , Set.toList (Set.fromList (List.concatMap Tuple.second walked))
+    )
+
+
+-- The block that follows `lbl` in EMISSION order (QBE's Fallthrough).
+nextLabel : List String -> String -> List String
+nextLabel labels lbl =
+    case labels of
+        [] ->
+            []
+
+        x :: rest ->
+            if x == lbl then
+                case rest of
+                    y :: _ ->
+                        [ y ]
+
+                    [] ->
+                        []
+
+            else
+                nextLabel rest lbl
+
 
 
 -- rt_callN: the arity dispatch table entry.  rt_apply cannot call a

@@ -408,16 +408,25 @@ struct Region {
 // slots (`base = hdr + 40`).  TestMain's U6 rows pin this table to this
 // declaration.
 //
-//   slot 0  live      the slot count written by frame-enter (rt.zig: live@0)
+//   slot 0  live      the LIVE SLOT COUNT the kind-2 root's scan reads at
+//                     scan time (`np` is its address).  perf U-P3: on the WORD
+//                     arm frame-enter writes 0 and Lower bumps it with ONE
+//                     static store before every call that can reach a GC
+//                     safepoint, so the scan reads exactly the slots the body
+//                     has already stored a Value into; on the VAL arm it stays
+//                     the enter-time slot count (a val-arm slot is written
+//                     word by word, so its coverage unit is not one store)
 //   slot 1  wm        the ROOT REGISTRY watermark taken at enter; frame-leave
 //                     pops TO it (`Rt.rootPopTo(hdr->wm)`, never a bare pop:
 //                     the collector caches root slots above it)
 //   slot 2  next      the parent frame in the frame stack (globals word 1)
 //   slot 3  freeNext  the freelist link, written on leave, read on reuse
-//   slot 4  _pad      the rt.zig `slots` pointer field; NOTHING in the Mid
-//                     frame path reads or writes it (P1e dropped the counter
-//                     seeding along with the zero loop — Rt.rootPushValueArray
-//                     takes base+live explicitly), so it is a named hole
+//   slot 4  _pad      the frame's SLOT COUNT, written at enter and read by
+//                     frame-leave's giant/pool decision.  It used to be the
+//                     rt.zig `slots` pointer field and a named hole; U-P3 makes
+//                     it carry nslots because slot 0 stopped being nslots (it
+//                     is a bumping live count now) and the pool bucket is keyed
+//                     by the frame's SIZE, not by what is live in it
 //
 // NOT a field, deliberately: the SLOTS themselves.  They begin at hdr + 40
 // (word 5), are variable in count, and are reached only with computed word
@@ -8577,6 +8586,34 @@ defun Rt.rootPopTo(wm : word) -> word {
 // number-0 Value (tag 0, payload 0) BEFORE rootPushValueArray — otherwise
 // scanValue chases freed GC pages.
 //
+// perf U-P3 "live-zero" — THE WORD ARM NO LONGER ZEROES THE WHOLE BLOCK, and
+// the contract that replaces the memset is a PAIR (this file + Lower's emit).
+// The memset existed because slot 0 was set to nslots at enter, i.e. the scan
+// covered every slot in the frame, so every slot had to hold a GC-safe word.
+// On the word arm a Value IS one 8-byte word (VR1), so the scan's count can be
+// bumped instead: frame-enter writes `hdr->live = 0` and Lower emits ONE
+// `storel L_i` into this field before every call that can reach a safepoint,
+// L_i being a per-call-site constant (1 + the highest slot that provably holds
+// a Value at that point).  A slot is therefore covered only after the body has
+// stored a Value into it, and a kind-2 scan of the frame can never read a
+// stale slot.  TWO THINGS KEEP IT SOUND AND BOTH LIVE IN LOWER: (a) the bump
+// is emitted at EVERY call site (a call is a safepoint unless proven
+// otherwise — the set is complete by construction, not by enumeration), and
+// (b) the slots BELOW L_i that are not yet written are zeroed at ENTER, one
+// store each, because the scan's coverage is a PREFIX: `%s0` (the result area)
+// and every slot a sibling branch allocated are covered while still unwritten,
+// and covering a stale word would scan a freed pointer.  The val arm keeps the
+// memset and `live = nslots`: a val-arm slot is written tag-word-then-payload,
+// so no single store marks it covered, and the memset is what makes its
+// coverage safe.
+//
+// WHAT THIS DOES *NOT* TOUCH: the root push still happens after the enter-side
+// zeroing on both arms, the registry layout and the kind-2 np contract are
+// unchanged (`np` still points at this field, read AT SCAN TIME), and slot 4
+// now carries nslots for frame-leave's giant/pool decision (see the header
+// table above) — the pool bucket is the frame's SIZE, and slot 0 stopped
+// being it.
+//
 // THE 175x FIX (stage-6 B0perf), THE ~3.4x->~1x CLOSE (stage-6 B0perf-2) and
 // THE BULK-ZERO CLOSE (stage-6 P1e): the original loop stored ONE BYTE per
 // iteration and re-boxed the decremented count (`mknum(...)`) on every `recur`
@@ -8588,10 +8625,11 @@ defun Rt.rootPopTo(wm : word) -> word {
 // `@memset(hdr.slots[0..nslots], zeroValue())` Zig emits (rt.zig:281).  Byte
 // equivalence: a Value is 5 words, and the loop wrote five zero WORDS per slot
 // (40 zero bytes) — memset writes the same 40*nslots zero bytes in one call.
-// Header word 4 (the slots-POINTER field) is written by NEITHER shape: the Mid
-// frame path never reads it (Rt.rootPushValueArray takes base+live
-// explicitly), so the old counter seeding (wstore(hdr, 4, nslots)) drops with
-// the loop.
+// Header word 4 (the rt.zig `slots` pointer field) is written by BOTH shapes
+// again since U-P3: it carries nslots (one store at enter) because slot 0
+// stopped carrying it, and frame-leave's giant/pool decision reads it.  The
+// Mid frame path never READ the word before (Rt.rootPushValueArray takes
+// base+live explicitly), so nothing else changes with the re-tenancy.
 //
 // NOTE (P1e item 2, re-measured by perf U-P1 frame-mech): the `mknum`-to-slot-
 // then-`payload` round-trip IS the word-join-via-memory idiom and it is the
@@ -8611,8 +8649,11 @@ defun Rt.rootPopTo(wm : word) -> word {
 // >>> QBE_WORDVAL-ONLY
 // WORD ARM (perf VR3c AREA 4): the HEADER does not move — 5 words / 40 bytes,
 // `base = hdr + 40`, the pooled-freelist index by `nslots`, and NO anchor words
-// (the P8 invariant).  Only the SLOT stride flips, 40 -> 8 bytes, in the two
-// places that size a frame: frameBlock's `bytes` and frame-enter's memset.
+// (the P8 invariant).  The SLOT stride flips, 40 -> 8 bytes, in the two places
+// that size a frame: frameBlock's `bytes` and the memset — which U-P3 DELETED
+// on this arm, replacing it with Lower's per-safepoint live bumps plus the
+// enter-side zeroing of exactly the slots the bumps can cover while still
+// unwritten (see the U-P3 NOTE above; the val arm keeps both).
 // Everything BELOW `base` already follows the instance rather than this text:
 // the emitted slot address table, the param/capture/result blits and slot 0/1's
 // materialisation are VR3b2's frame-stride port, and the collector reaches the
@@ -8659,11 +8700,21 @@ defun Rt.frame-enter(nslots : word) -> word {
   word base = [word](hdr) + 40;
   // >>> QBE_VAL-ONLY
   rawcall memset(base, 0, 40 * nslots);
+  hdr->live = nslots;
   // <<< QBE_VAL-ONLY
   // >>> QBE_WORDVAL-ONLY
-  rawcall memset(base, 0, 8 * nslots);
+  // U-P3: the word arm zeroes NOTHING here — a Value is one 8-byte word, so
+  // Lower bumps the scan's count instead (see the family NOTE above) and the
+  // slots it covers are the ones the body already stored.  live starts at 0,
+  // which is also the value frame-leave and the first bump read as "nothing
+  // covered yet".
+  hdr->live = 0;
   // <<< QBE_WORDVAL-ONLY
-  hdr->live = nslots;
+  // THE SIZE, for frame-leave's pool decision (header slot 4).  It cannot be
+  // slot 0 any more on the word arm (that is the bumping live count), and the
+  // pool bucket is keyed by the frame's SIZE — a frame pooled under its live
+  // count would be handed out for a different nslots.
+  hdr->_pad = nslots;
   // ONE globals read for the whole body (the block, the watermark, the frame
   // chain and the root push all live in it).  The watermark is INLINED
   // Rt.rootWatermark — a load of word 5, the registry depth — instead of a call
@@ -8675,11 +8726,13 @@ defun Rt.frame-enter(nslots : word) -> word {
   wstore(glob, 1, hdr);
   // THE ROOT PUSH STAYS A CALL, and that is a PIN, not an oversight:
   // TestMain's `P1e zero-BEFORE-root` row (TestMain.elm:2668, predicate
-  // memsetBeforeRootPush at :17396) reads this defun's IL and requires a
-  // `q_Rt_x2erootPushValueArray` call AFTER the memset.  Inlining the three
-  // wstores would delete the symbol the row keys on and turn it red, so the
-  // push stays spelled as the call the row measures — the ORDER is the
-  // correctness property, and it is unchanged: the memset above runs first.
+  // zeroBeforeRootPush at :17396) reads this defun's IL and requires a
+  // `q_Rt_x2erootPushValueArray` call AFTER the enter-side zeroing.  Inlining
+  // the three wstores would delete the symbol the row keys on and turn it red,
+  // so the push stays spelled as the call the row measures — the ORDER is the
+  // correctness property, and it is unchanged: on the val arm the memset above
+  // runs first, on the word arm Lower's enter-side zero stores do (they are the
+  // prologue's, i.e. this call's caller).
   call Rt.rootPushValueArray(base, hdr);
   return base;
 }
@@ -8710,7 +8763,12 @@ defun Rt.frame-leave() -> word {
     return 0;
   };
   wstore(glob, 5, wm);
-  word n = hdr->live;
+  // THE FRAME'S SIZE, not its live count: header slot 4 is written by
+  // frame-enter on both arms (U-P3 — slot 0 is a bumping live count on the
+  // word arm and would pool a 24-slot frame in the bucket of whatever was live
+  // in it).  The pool is keyed by SIZE, and the giant cutoff below is the same
+  // 8192 frameBlock bounds.
+  word n = hdr->_pad;
   word pooled = if (wload(glob, 2) != 0) {
     // QBE_NO_REUSE: frame-leave never pools here, and this arm is the only
     // writer of the frame pool, so under the knob the pool stays empty and
