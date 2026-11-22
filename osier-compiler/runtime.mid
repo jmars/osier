@@ -8482,12 +8482,21 @@ defun Rt.rootPopTo(wm : word) -> word {
 // explicitly), so the old counter seeding (wstore(hdr, 4, nslots)) drops with
 // the loop.
 //
-// NOTE (P1e item 2 deferred): frameBlock's three `payload(mknum(..))` selects
-// and frame-leave's two dead word-if binders are LEFT AS-IS.  A rawAbi WORD
-// defun has NO word-join — `lowerTailWordBranches` rejects a tail If whose two
-// branches both return a word (no phi), and a word-valued `?:`/`if` in a value
-// slot is a loud `wordProducerMessage` — so the `mknum`-to-slot-then-`payload`
-// round-trip IS the word-join-via-memory idiom, the minimal expressible form.
+// NOTE (P1e item 2, re-measured by perf U-P1 frame-mech): the `mknum`-to-slot-
+// then-`payload` round-trip IS the word-join-via-memory idiom and it is the
+// LANGUAGE'S FLOOR for a conditional WORD — a rawAbi WORD defun has no word
+// join (`lowerTailWordBranches` rejects a tail If whose two branches both
+// return a word, no phi), a word-valued `?:` is a loud `wordProducerMessage` in
+// a value slot, and a one-sided non-diverging mid-block if is a loud J7 reject,
+// so a conditional EFFECT can only be a dead bind and a conditional VALUE can
+// only be a val select.  What U-P1 therefore removed is every select the floor
+// does NOT force: frameBlock's globals base and bucket head are now word
+// arithmetic (`inPool` and a masked load, no box, no tag dispatch) and only the
+// RESULT still goes through one select; frame-enter and frame-leave each read
+// `rt_glob_addr` ONCE and inline the registry seats they used to call
+// (rootWatermark's word-5 load, rootPopTo's truncation + its loud guard), while
+// frame-enter's root PUSH stays a CALL because TestMain's `P1e zero-BEFORE-root`
+// row keys on the `q_Rt_x2erootPushValueArray` symbol it emits.
 // >>> QBE_WORDVAL-ONLY
 // WORD ARM (perf VR3c AREA 4): the HEADER does not move — 5 words / 40 bytes,
 // `base = hdr + 40`, the pooled-freelist index by `nslots`, and NO anchor words
@@ -8506,14 +8515,30 @@ defun Rt.frameBlock(nslots : word) -> word {
   // >>> QBE_WORDVAL-ONLY
   word bytes = 40 + 8 * nslots;
   // <<< QBE_WORDVAL-ONLY
-  word g = payload((nslots < 8192) ? mknum(rawcall rt_glob_addr()) : mknum(0), 0);
-  *FrameHdr h = payload((g != 0) ? mknum(wload(g, 16 + nslots)) : mknum(0), 0);
+  // THE BOUND, BRANCHLESS.  A frame at or above the pool bound (a GIANT) has no
+  // bucket: `inPool` is 0, so its INDEX is 0 (the region word, always a safe
+  // read) and its head is masked to 0 — the pop below cannot run for it and
+  // the malloc'd block is never pooled, which is what keeps frame-leave's
+  // `n >= 8192` free arm its only owner.  Both selects the old spelling made
+  // here (a boxed `mknum`/`payload` pair per word) are gone: the index is word
+  // arithmetic and the head is one masked load.
+  word inPool = nslots < 8192;
+  word g = rawcall rt_glob_addr();
+  *FrameHdr h = inPool * wload(g, inPool * (16 + nslots));
+  // POP: the bucket head becomes the block's freeNext.  A zero head is an
+  // empty bucket (or a giant) — malloc it instead, below.
   word popped = if (h != 0) {
     wstore(g, 16 + nslots, h->freeNext);
     return 0;
   } else {
     return 0;
   };
+  // THE ONE SELECT LEFT, and it is the language's floor: a conditional WORD
+  // has no other spelling — a rawAbi tail If with two word-returning branches
+  // is a loud Err (Lower's lowerTailWord, no phi), so the block comes out
+  // through the box/extract identity the file already uses.  It runs ONCE now
+  // (the old body boxed and re-dispatched THREE words: the globals base, the
+  // bucket head and this result).
   word r = payload((h != 0) ? mknum(h) : mknum(rawcall malloc(bytes)), 0);
   return r;
 }
@@ -8528,11 +8553,22 @@ defun Rt.frame-enter(nslots : word) -> word {
   rawcall memset(base, 0, 8 * nslots);
   // <<< QBE_WORDVAL-ONLY
   hdr->live = nslots;
-  word wm = call Rt.rootWatermark();
-  hdr->wm = wm;
+  // ONE globals read for the whole body (the block, the watermark, the frame
+  // chain and the root push all live in it).  The watermark is INLINED
+  // Rt.rootWatermark — a load of word 5, the registry depth — instead of a call
+  // that loaded the same word through its own rt_glob_addr.
   word glob = rawcall rt_glob_addr();
+  word wm = wload(glob, 5);
+  hdr->wm = wm;
   hdr->next = wload(glob, 1);
   wstore(glob, 1, hdr);
+  // THE ROOT PUSH STAYS A CALL, and that is a PIN, not an oversight:
+  // TestMain's `P1e zero-BEFORE-root` row (TestMain.elm:2668, predicate
+  // memsetBeforeRootPush at :17396) reads this defun's IL and requires a
+  // `q_Rt_x2erootPushValueArray` call AFTER the memset.  Inlining the three
+  // wstores would delete the symbol the row keys on and turn it red, so the
+  // push stays spelled as the call the row measures — the ORDER is the
+  // correctness property, and it is unchanged: the memset above runs first.
   call Rt.rootPushValueArray(base, hdr);
   return base;
 }
@@ -8547,7 +8583,22 @@ defun Rt.frame-leave() -> word {
     return 0;
   };
   wstore(glob, 1, hdr->next);
-  call Rt.rootPopTo(hdr->wm);
+  // POP-TO, INLINED (Rt.rootPopTo's body): truncate the registry back to the
+  // depth this frame took at enter.  NEVER a bare pop — a nested frame or an
+  // apply arm's env root would be the entry a bare pop removed, the frame's
+  // own ROOT_VALUE_ARRAY would leak, and every later collect would scan a freed
+  // block's stale slots (the historical qbe-gcbug).  The truncation guard is
+  // kept LOUD and in the same place: `wm > n` is the lost-balance fatal, now a
+  // bare word compare instead of a call's boxed one.
+  word wm = hdr->wm;
+  word rn = wload(glob, 5);
+  word imbalanced = if (wm > rn) {
+    call Rt.die(rawstr("qbe-rt: midgc: root pop_to above the registry depth"));
+    return 0;
+  } else {
+    return 0;
+  };
+  wstore(glob, 5, wm);
   word n = hdr->live;
   word pooled = if (wload(glob, 2) != 0) {
     // QBE_NO_REUSE: frame-leave never pools here, and this arm is the only
