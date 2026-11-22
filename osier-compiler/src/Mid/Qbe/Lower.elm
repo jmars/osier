@@ -1,4 +1,4 @@
-module Mid.Qbe.Lower exposing (lower, lowerWith, wordArmDefunRefusals, wordArmUnported, wordSurfaceUnported, wordSurfaceUnportedWith)
+module Mid.Qbe.Lower exposing (lower, lowerWith, regionSlots, wordArmDefunRefusals, wordArmUnported, wordSurfaceUnported, wordSurfaceUnportedWith)
 
 -- Mid.Qbe.Lower — Mid.Ir -> Qbe.Il (native-backend stage 1; handoff-qbe-lower).
 --
@@ -6512,15 +6512,45 @@ ffiArgClass w =
 
 
 
-{-| The Mid routing for the two raw allocating nodes: box the length
+{-| THE ALLOCATION SITE.  Two routings, one entry point:
+
+  * the WORD arm takes the INLINE young-bump fast path (`midGcAllocYoung`) for
+    every seat `wordAllocPlan` knows, and the seat CALL as its slow path;
+  * the VAL arm — and any word-arm seat with no plan — takes the seat call
+    (`midGcAllocSeatCall`), unchanged: it is the differential oracle.
+
+The val arm's state is handed to `midGcAllocSeatCall` untouched, so every
+val-arm temp keeps the name it had before this unit and the val arm's emit is
+byte-for-byte what it was.
+-}
+midGcAllocSeat : String -> Il.Arg -> S -> ( Il.Arg, S )
+midGcAllocSeat seatKey lenA s =
+    if wordArm s then
+        case wordAllocPlan seatKey of
+            Just plan ->
+                midGcAllocYoung plan seatKey lenA s
+
+            Nothing ->
+                midGcAllocSeatCall seatKey lenA s
+
+    else
+        midGcAllocSeatCall seatKey lenA s
+
+
+{-| The Mid routing for the raw allocating nodes: box the length
 word into a number Value slot, call the Mid seat's lean-ABI `q_Rt_*` entry
 (one pointer arg, direct `:val` return), and read the body address back out
 of the result's payload word 0 into a raw temp.  The seat is `Rt.allocVector`
 / `Rt.allocRaw` — the Mid allocating seats whose bodies own the heap and
 trigger `Rt.collect` (Mid.RtGc).
+
+THIS IS THE SLOW PATH of `midGcAllocSeat`'s word arm as well as the whole of
+its val arm: it is the seat that owns the collect trigger, the scavenge, the
+free-list pop, the growth and the out-of-memory die, so the inline fast path
+never has to restate any of them.
 -}
-midGcAllocSeat : String -> Il.Arg -> S -> ( Il.Arg, S )
-midGcAllocSeat seatKey lenA s =
+midGcAllocSeatCall : String -> Il.Arg -> S -> ( Il.Arg, S )
+midGcAllocSeatCall seatKey lenA s =
     let
         ( slot, s1 ) =
             freshSlot s
@@ -6588,6 +6618,596 @@ midGcAllocSeat seatKey lenA s =
             |> emit (Bin (Just aT) L Add (Il.Tmp vp) (Il.Con (RtLayout.payloadWordOffset s.layout 0)))
             |> emit (Load (Just t) L LoadL (Il.Tmp aT))
         )
+
+
+-- ============ U-R1 (perf inline-alloc): THE INLINE YOUNG-BUMP FAST PATH ============
+-- WHAT THIS DELETES.  `runtime.mid`'s allocation path is TWO framed `:val`
+-- calls per object: the emitter calls the seat (`q_Rt_allocSym`/
+-- `..._allocVector`/`..._allocRecord`/`..._allocRaw`/`..._allocFloat`), and the
+-- seat calls `Rt.gcAlloc`.  MEASURED on the post-U-P3 leaf profile, `gcAlloc`
+-- is 24.2% of the samples — the top row — and every one of those calls paid
+-- frameBlock, a root push, the U-P3 live bumps, one `mknum` box per argument
+-- and frame-leave before it reached the nursery.  U-P2 had already removed the
+-- third call (`Rt.kindHdr`); this removes the two that are left on the FAST
+-- path, and leaves both of them in place as the slow path.
+--
+-- WHAT IT EMITS, in `Rt.gcAlloc`'s OWN ORDER (the reference is that defun; this
+-- is its nursery arm, with `kind` a compile-time constant):
+--
+--   1. THE REGION WORD is `wload(rt_glob_addr(), 0)` — a `loadl $rt_glob` and
+--      a load.  `rt_glob_addr` is a `ret $rt_glob` accessor, so calling it
+--      would be a call per allocation; a symbol IS a legal `l` operand for
+--      load/store (MEASURED against the vendored qbe, tools/qbe fixtures'
+--      shape: `%r =l loadl $rt_glob`).
+--   2. THE COLLECT TRIGGER, FIRST, exactly as gcAlloc tests it
+--      (`allocated > (heapEnd - heapStart) / 4`).  A taken trigger is a SLOW
+--      path: the seat is called, and it collects and allocates.  This is why
+--      the inline path cannot change the collection cadence — it is the same
+--      test, on the same words, in the same order.
+--   3. THE NURSERY TEST: `young != 0` and `cursor + phys <= youngEnd`.  ONE
+--      test covers BOTH of gcAlloc's: its `phys <= youngEnd - youngStart`
+--      (the giant request) is implied, because `cursor >= youngStart`, so a
+--      request bigger than the whole nursery also fails `cursor + phys <=
+--      youngEnd`.  A failure is a SLOW path, so a FILL still goes through the
+--      seat's scavenge-then-retry: the retry-fits rule stays gcAlloc's.
+--   4. THE HEADER is the KIND-CONTRACT word with U-P2's inlined arithmetic
+--      (`scan*2 + cls*4 + kind*2^24`) — the same number `Rt.kindHdr` states
+--      and gcAlloc's three writers store, and `scan` is DERIVED from the kind
+--      code through `RtLayout.heapKindScanned`, so the two statements cannot
+--      drift.  The class ladder above it is gcAlloc's too (`gcSizeClass`).
+--   5. THE BUMP is the two cursor stores (`youngCursor`, `allocated`).
+--   6. THE SLOW PATH is `midGcAllocSeatCall` — the existing seat call,
+--      unchanged, so `Rt.allocKind`'s code-0 refusal, the free-list pop, the
+--      scavenge, the growth and the out-of-memory die all stay where they are.
+--
+-- WHY IT IS SOUND AT A SAFEPOINT.  An allocation site is ALREADY a safepoint
+-- (U-P3's live-bump pass emits a `storel L, %lp` before every `Call`), so the
+-- inlined body needs no new live-store class: it replaces a call with code at
+-- an already-covered safepoint.  The fast path contains NO call, so nothing
+-- between the header store and the bump can collect, and the block is born
+-- complete — the atomic-build invariant (all field values BEFORE the alloc) is
+-- untouched, because the allocation is still the last thing that happens.
+--
+-- WHAT IT DOES NOT DO: it does not touch the block map (the nursery's blocks
+-- are never in it — gcAlloc's young arm writes no `bmPtr` byte either), it
+-- does not write the region's `kind`/`count` STAGING pair (only `gcAllocGo`'s
+-- free-list pop reads them, and that pop is reached only from gcAlloc, which
+-- writes them just before), and it does not carry the RS/FORWARDED bits (a
+-- fresh header has them clear; `hdrW`'s own arithmetic clears them).
+
+
+{-| THE SIZE LADDER, as `runtime.mid`'s `Rt.gcAlloc` states it: 8-word
+granularity up to 4096 words, then 4096-word granularity above
+(`classOf(total) = (total <= 4096) ? ((total+7)/8) : (512 + (total-1)/4096)`,
+`phys(cls) = (cls <= 512) ? cls*8 : (cls-511)*4096`).  The THREE writers of a
+header (gcAlloc's bump, gcAllocGo's free-list pop, this emitter) must agree,
+and gcAlloc's own spelling is the reference.  These are here rather than in
+`Mid/RtLayout.elm` because they are the collector's allocation POLICY, not the
+value layout — and that module's parse contract (`tools/qbe/layout-census.sh`)
+admits no new top-level constant.
+-}
+gcSmallLimit : Int
+gcSmallLimit =
+    4096
+
+
+gcSmallGran : Int
+gcSmallGran =
+    8
+
+
+gcBigBase : Int
+gcBigBase =
+    512
+
+
+gcBigGran : Int
+gcBigGran =
+    4096
+
+
+{-| `(class, physical BYTES)` for a body size in WORDS — gcAlloc's ladder,
+folded for the compile-time-count sites (a record literal's `n + 1`, a symbol
+cell's 1, a string cell's 2, a float cell's 1: five of the seven seats).
+
+THE BYTES ARE `phys * 8`, and that factor is LOAD-BEARING: gcAlloc's `phys` is
+a WORD count (`physLo = cls * 8`, `physHi = (cls-511) * 4096`) and every use
+multiplies it back — `youngCursor = yc0 + phys * 8`, `allocated + phys * 8`,
+`phys * 8 <= youngEnd - youngStart`.  MEASURED the hard way: a first cut that
+bumped by `phys` (words) instead of `phys * 8` (bytes) handed out an 8-byte
+block for a 32-byte object, the nursery overwrote its own live objects, and the
+word-arm elm gate went 146 rows RED on rc 139.
+-}
+gcSizeClass : Int -> ( Int, Int )
+gcSizeClass total =
+    if total <= gcSmallLimit then
+        let
+            cls =
+                (total + gcSmallGran - 1) // gcSmallGran
+        in
+        ( cls, cls * gcSmallGran * RtLayout.wordBytes )
+
+    else
+        let
+            cls =
+                gcBigBase + (total - 1) // gcBigGran
+        in
+        ( cls, (cls - gcBigBase + 1) * gcBigGran * RtLayout.wordBytes )
+
+
+{-| 2^n, as a product: the selfhost subset has no `^` (Prelude), and the KIND
+CODE's unit is `2 ^ RtLayout.heapKindShift` — derived here rather than
+restated as `16777216`, so the shift has one statement.
+-}
+pow2 : Int -> Int
+pow2 n =
+    if n <= 0 then
+        1
+
+    else
+        2 * pow2 (n - 1)
+
+
+{-| THE KIND-CONTRACT HEADER WORD for a code and a class — gcAlloc's
+`scanK * 2 + cls * 4 + kindW * 16777216` with `scanK` DERIVED from the code
+(`RtLayout.heapKindScanned` is the same five-code set `Rt.kindHdr` sums).
+-}
+gcHeaderWord : Int -> Int -> Int
+gcHeaderWord kind cls =
+    (if RtLayout.heapKindScanned kind then
+        2
+
+     else
+        0
+    )
+        + cls * 4
+        + kind * pow2 RtLayout.heapKindShift
+
+
+{-| `runtime.mid`'s `struct Region`, by NAME, for the six fields the inline
+allocation path reads (slots 2/4/11 and 28/30/31 — the U5 row in TestMain
+pins the declaration's field order, and U-R1's row pins these six against it).
+A record rather than a list so a mistyped field is a compile error and there is
+no fallback slot.
+-}
+type alias RegionSlots =
+    { heapStart : Int
+    , heapEnd : Int
+    , allocated : Int
+    , young : Int
+    , youngEnd : Int
+    , youngCursor : Int
+    }
+
+
+regionSlots : RegionSlots
+regionSlots =
+    { heapStart = 2
+    , heapEnd = 4
+    , allocated = 11
+    , young = 28
+    , youngEnd = 30
+    , youngCursor = 31
+    }
+
+
+{-| A Region field's BYTE offset: a slot index times a C word.  The struct is
+`word`-typed on BOTH arms (Mid's front end sizes `word` at 8 bytes under any
+layout — the same fact `Rt.hostInit`'s blob carries), so this is
+`RtLayout.wordBytes`, never the arm's Value size.
+-}
+regionOff : Int -> Int
+regionOff slot =
+    slot * RtLayout.wordBytes
+
+
+{-| THE PLAN PER SEAT: the KIND CODE the seat passes to `gcAlloc`, how the
+emitter's LENGTH argument becomes `gcAlloc`'s COUNT word, and whether the seat
+returns a BYTE BASE inside a cell it also initialises (the string cell).
+
+Every one of these is `runtime.mid`'s seat body restated for the emitter —
+`Rt.allocSym`/`allocVector` pass the length straight through, `allocRecord`
+adds the names word (`n + 1`), `allocFloat` allocates one word, and
+`allocRaw(bytes)` allocates `2 + ceil(bytes/8)` words and hands back `body + 2
+units` after writing the cell's own byte self-address into unit 0 and 0 into
+unit 1.  The seats KEEP those bodies: they are the slow path, and their
+refusals (`allocKind(0)`) stay loud there.
+-}
+type alias WordAllocPlan =
+    { kind : Int
+    , count : Il.Arg -> S -> ( Il.Arg, S )
+    , byteBase : Bool
+    }
+
+
+wordAllocPlan : String -> Maybe WordAllocPlan
+wordAllocPlan seatKey =
+    case seatKey of
+        "Rt.allocSym" ->
+            Just { kind = RtLayout.tagSymbol, count = countIdentity, byteBase = False }
+
+        "Rt.allocVector" ->
+            Just { kind = RtLayout.tagVector, count = countIdentity, byteBase = False }
+
+        "Rt.allocRecord" ->
+            Just { kind = RtLayout.tagRecord, count = countPlusOne, byteBase = False }
+
+        "Rt.allocFloat" ->
+            Just { kind = RtLayout.tagFloat, count = countOne, byteBase = False }
+
+        "Rt.allocRaw" ->
+            Just { kind = RtLayout.tagString, count = countStringCell, byteBase = True }
+
+        _ ->
+            Nothing
+
+
+-- The COUNT transforms.  A length that is already an `Il.Con` is folded HERE,
+-- which is what keeps the five constant-count seats' whole size ladder (and
+-- their header word) a compile-time constant.
+countIdentity : Il.Arg -> S -> ( Il.Arg, S )
+countIdentity len s =
+    ( len, s )
+
+
+countOne : Il.Arg -> S -> ( Il.Arg, S )
+countOne _ s =
+    ( Il.Con 1, s )
+
+
+countPlusOne : Il.Arg -> S -> ( Il.Arg, S )
+countPlusOne len s =
+    case len of
+        Il.Con n ->
+            ( Il.Con (n + 1), s )
+
+        _ ->
+            let
+                ( t, s1 ) =
+                    binArg Add len (Il.Con 1) s
+            in
+            ( Il.Tmp t, s1 )
+
+
+{-| `Rt.allocRaw`'s body word count: `2 + ceil(bytes/8)` — the two header units
+(the byte self-address and the length) plus the bytes.
+-}
+countStringCell : Il.Arg -> S -> ( Il.Arg, S )
+countStringCell len s =
+    case len of
+        Il.Con n ->
+            ( Il.Con (2 + (n + RtLayout.wordBytes - 1) // RtLayout.wordBytes), s )
+
+        _ ->
+            let
+                ( w0, s1 ) =
+                    binArg Add len (Il.Con (RtLayout.wordBytes - 1)) s
+
+                ( w1, s2 ) =
+                    binArg Shr (Il.Tmp w0) (Il.Con 3) s1
+
+                ( w2, s3 ) =
+                    binArg Add (Il.Tmp w1) (Il.Con 2) s2
+            in
+            ( Il.Tmp w2, s3 )
+
+
+-- Small emitters over the current block: a binary op into a fresh temp (the
+-- temp's NAME), an `l` compare into a fresh `w` flag (its NAME), a `w` op over
+-- two flags, a widening of a flag to `l`, and a word load off an address temp.
+binArg : BinOp -> Il.Arg -> Il.Arg -> S -> ( String, S )
+binArg op a b s =
+    let
+        ( t, s1 ) =
+            freshTmp s
+    in
+    ( t, emit (Bin (Just t) L op a b) s1 )
+
+
+cmpArg : CmpOp -> Il.Arg -> Il.Arg -> S -> ( String, S )
+cmpArg op a b s =
+    let
+        ( t, s1 ) =
+            freshTmp s
+    in
+    ( t, emit (Cmp (Just t) L op a b) s1 )
+
+
+binFlag : BinOp -> String -> String -> S -> ( String, S )
+binFlag op a b s =
+    let
+        ( t, s1 ) =
+            freshTmp s
+    in
+    ( t, emit (Bin (Just t) W op (Il.Tmp a) (Il.Tmp b)) s1 )
+
+
+widenFlag : String -> S -> ( String, S )
+widenFlag f s =
+    let
+        ( t, s1 ) =
+            freshTmp s
+    in
+    ( t, emit (Unary (Just t) L Extsw (Il.Tmp f)) s1 )
+
+
+loadWordAt : String -> S -> ( String, S )
+loadWordAt addr s =
+    let
+        ( t, s1 ) =
+            freshTmp s
+    in
+    ( t, emit (Load (Just t) L LoadL (Il.Tmp addr)) s1 )
+
+
+{-| THE HEADER WORD AND THE BLOCK SIZE (in BYTES, as gcAlloc's `phys * 8`) for a
+count in WORDS.  A constant count
+folds to two `Il.Con`s; a runtime count (a vector built at a length the caller
+computed) emits gcAlloc's branchless ladder — `small` as a 0/1 flag widened to
+`l`, both arms of each select computed and one multiplied by 0, which is exact
+because both are small positive words.  Both of gcAlloc's divisors are powers
+of two, which is why its `/` is a shift here: `>> 3` is `/ gcSmallGran` and
+`>> 12` is `/ gcBigGran`.
+-}
+wordAllocHeader : Int -> Il.Arg -> S -> ( Il.Arg, Il.Arg, S )
+wordAllocHeader kind countA s0 =
+    case countA of
+        Il.Con n ->
+            let
+                ( cls, phys ) =
+                    gcSizeClass (2 + n)
+            in
+            ( Il.Con (gcHeaderWord kind cls), Il.Con phys, s0 )
+
+        _ ->
+            let
+                ( total, s1 ) =
+                    binArg Add countA (Il.Con 2) s0
+
+                ( smallW, s2 ) =
+                    cmpArg Csle (Il.Tmp total) (Il.Con gcSmallLimit) s1
+
+                ( small, s3 ) =
+                    widenFlag smallW s2
+
+                ( clUp, s4 ) =
+                    binArg Add (Il.Tmp total) (Il.Con (gcSmallGran - 1)) s3
+
+                ( clsLo, s5 ) =
+                    binArg Shr (Il.Tmp clUp) (Il.Con 3) s4
+
+                ( hiBase, s6 ) =
+                    binArg Sub (Il.Tmp total) (Il.Con 1) s5
+
+                ( clsHi0, s7 ) =
+                    binArg Shr (Il.Tmp hiBase) (Il.Con 12) s6
+
+                ( clsHi, s8 ) =
+                    binArg Add (Il.Tmp clsHi0) (Il.Con gcBigBase) s7
+
+                ( clsGap, s9 ) =
+                    binArg Sub (Il.Tmp clsLo) (Il.Tmp clsHi) s8
+
+                ( clsAdd, s10 ) =
+                    binArg Mul (Il.Tmp small) (Il.Tmp clsGap) s9
+
+                ( cls, s11 ) =
+                    binArg Add (Il.Tmp clsHi) (Il.Tmp clsAdd) s10
+
+                ( physLo, s12 ) =
+                    binArg Mul (Il.Tmp cls) (Il.Con (gcSmallGran * RtLayout.wordBytes)) s11
+
+                ( bigIdx, s13 ) =
+                    binArg Sub (Il.Tmp cls) (Il.Con (gcBigBase - 1)) s12
+
+                ( physHi, s14 ) =
+                    binArg Mul (Il.Tmp bigIdx) (Il.Con (gcBigGran * RtLayout.wordBytes)) s13
+
+                ( physGap, s15 ) =
+                    binArg Sub (Il.Tmp physLo) (Il.Tmp physHi) s14
+
+                ( physAdd, s16 ) =
+                    binArg Mul (Il.Tmp small) (Il.Tmp physGap) s15
+
+                ( phys, s17 ) =
+                    binArg Add (Il.Tmp physHi) (Il.Tmp physAdd) s16
+
+                ( clsBits, s18 ) =
+                    binArg Mul (Il.Tmp cls) (Il.Con 4) s17
+
+                ( hdr, s19 ) =
+                    binArg Add
+                        (Il.Tmp clsBits)
+                        (Il.Con
+                            (kind
+                                * pow2 RtLayout.heapKindShift
+                                + (if RtLayout.heapKindScanned kind then
+                                    2
+
+                                   else
+                                    0
+                                  )
+                            )
+                        )
+                        s18
+            in
+            ( Il.Tmp hdr, Il.Tmp phys, s19 )
+
+
+{-| THE FAST ARM'S RESULT, in the join's temp.  A plain seat hands back the
+BODY; `Rt.allocRaw` hands back the BYTE BASE and initialises the two units
+below it (unit 0 the cell's own byte self-address — `Rt.gcScavPtr`'s promotion
+fixup reads it — and unit 1 the length, which `mkstr` overwrites), so this
+writes both and returns `body + 2 units`, exactly as the seat does.
+-}
+wordAllocResult : WordAllocPlan -> String -> Il.Arg -> S -> S
+wordAllocResult plan res body s0 =
+    if plan.byteBase then
+        let
+            ( base, s1 ) =
+                binArg Add body (Il.Con (RtLayout.heapBodyUnitOffset s0.layout 2)) s0
+
+            ( lenUnit, s2 ) =
+                binArg Add body (Il.Con (RtLayout.heapBodyUnitOffset s0.layout 1)) s1
+        in
+        s2
+            |> emit (Store StoreL (Il.Tmp base) body)
+            |> emit (Store StoreL (Il.Con 0) (Il.Tmp lenUnit))
+            |> emit (Bin (Just res) L Add (Il.Tmp base) (Il.Con 0))
+
+    else
+        emit (Bin (Just res) L Add body (Il.Con 0)) s0
+
+
+{-| THE INLINE YOUNG-BUMP ALLOCATION.  Emits the tests and the bump and leaves
+the result in ONE temp that BOTH arms define: the IL is non-SSA on purpose
+(`Mid.Qbe.Il`'s header — QBE's own SSA construction renames a temp assigned in
+two branches), so the join needs no slot and no phi.
+-}
+midGcAllocYoung : WordAllocPlan -> String -> Il.Arg -> S -> ( Il.Arg, S )
+midGcAllocYoung plan seatKey lenA s0 =
+    let
+        ( slowLbl, s1 ) =
+            freshLbl "allocslow" s0
+
+        ( chkLbl, s2 ) =
+            freshLbl "allocchk" s1
+
+        ( fastLbl, s3 ) =
+            freshLbl "allocfast" s2
+
+        ( joinLbl, s4 ) =
+            freshLbl "allocjoin" s3
+
+        ( res, s5 ) =
+            freshTmp s4
+
+        ( countA, s6 ) =
+            plan.count lenA s5
+
+        ( hdrA, physA, s7 ) =
+            wordAllocHeader plan.kind countA s6
+
+        ( regionT, s8 ) =
+            freshTmp s7
+
+        ( absentT, s9 ) =
+            freshTmp s8
+
+        -- THE REGION WORD IN ONE LOAD.  `rt_glob`'s word 0 IS the region
+        -- pointer (`wload(rt_glob_addr(), 0)`), and a symbol is an address
+        -- operand, so the accessor's `ret $rt_glob` and the `wload`'s own
+        -- `add %glob, 0` both fold away: this is `%r =l loadl $rt_glob`.
+        -- MEASURED the hard way: a first cut loaded TWICE (the region's word 0,
+        -- the magic, read back as "the region") and every word-arm allocation
+        -- dereferenced `magic + 88`.
+        opened =
+            s9
+                |> emit (Load (Just regionT) L LoadL (Il.Sym RtGc.globDataSym))
+                |> emit (Cmp (Just absentT) L Ceq (Il.Tmp regionT) (Il.Con 0))
+                |> closeBlock (Jnz (Il.Tmp absentT) slowLbl chkLbl)
+                |> startBlock chkLbl
+
+        regionArg =
+            Il.Tmp regionT
+
+        -- THE COLLECT TRIGGER (gcAlloc's, first): allocated > (heapEnd - heapStart)/4
+        ( alAt, s11 ) =
+            memAddr regionArg (regionOff regionSlots.allocated) opened
+
+        ( allocatedW, s12 ) =
+            loadWordAt alAt s11
+
+        ( hsAt, s13 ) =
+            memAddr regionArg (regionOff regionSlots.heapStart) s12
+
+        ( heapStartW, s14 ) =
+            loadWordAt hsAt s13
+
+        ( heAt, s15 ) =
+            memAddr regionArg (regionOff regionSlots.heapEnd) s14
+
+        ( heapEndW, s16 ) =
+            loadWordAt heAt s15
+
+        ( spanT, s17 ) =
+            binArg Sub (Il.Tmp heapEndW) (Il.Tmp heapStartW) s16
+
+        ( limT, s18 ) =
+            binArg Shr (Il.Tmp spanT) (Il.Con 2) s17
+
+        ( overT, s19 ) =
+            cmpArg Csgt (Il.Tmp allocatedW) (Il.Tmp limT) s18
+
+        -- THE NURSERY: young != 0 and cursor + phys <= youngEnd
+        ( youngAt, s20 ) =
+            memAddr regionArg (regionOff regionSlots.young) s19
+
+        ( youngW, s21 ) =
+            loadWordAt youngAt s20
+
+        ( offT, s22 ) =
+            cmpArg Ceq (Il.Tmp youngW) (Il.Con 0) s21
+
+        ( yeAt, s23 ) =
+            memAddr regionArg (regionOff regionSlots.youngEnd) s22
+
+        ( youngEndW, s24 ) =
+            loadWordAt yeAt s23
+
+        ( ycAt, s25 ) =
+            memAddr regionArg (regionOff regionSlots.youngCursor) s24
+
+        ( cursorW, s26 ) =
+            loadWordAt ycAt s25
+
+        -- THE BUMP IS IN BYTES (`physA` is `phys * 8`, gcAlloc's own unit).
+        ( nextT, s27 ) =
+            binArg Add (Il.Tmp cursorW) physA s26
+
+        ( fillT, s28 ) =
+            cmpArg Csgt (Il.Tmp nextT) (Il.Tmp youngEndW) s27
+
+        ( bad1, s29 ) =
+            binFlag Or overT offT s28
+
+        ( bad2, s30 ) =
+            binFlag Or bad1 fillT s29
+
+        fastOpened =
+            s30
+                |> closeBlock (Jnz (Il.Tmp bad2) slowLbl fastLbl)
+                |> startBlock fastLbl
+
+        -- THE HEADER: the two words gcAlloc writes, at -16 and -8 from the body.
+        ( hdrAt, s31 ) =
+            binArg Sub (Il.Tmp cursorW) (Il.Con (0 - RtLayout.heapHeaderOffset s30.layout)) fastOpened
+
+        ( cntAt, s32 ) =
+            binArg Sub (Il.Tmp cursorW) (Il.Con (0 - RtLayout.heapHeaderOffset s30.layout - RtLayout.wordBytes)) s31
+
+        ( bumpedT, s33 ) =
+            binArg Add (Il.Tmp allocatedW) physA s32
+
+        fastDone =
+            s33
+                |> emit (Store StoreL hdrA (Il.Tmp hdrAt))
+                |> emit (Store StoreL countA (Il.Tmp cntAt))
+                |> emit (Store StoreL (Il.Tmp nextT) (Il.Tmp ycAt))
+                |> emit (Store StoreL (Il.Tmp bumpedT) (Il.Tmp alAt))
+                |> wordAllocResult plan res (Il.Tmp cursorW)
+                |> jumpTo joinLbl
+                |> startBlock slowLbl
+
+        ( slowBody, s34 ) =
+            midGcAllocSeatCall seatKey lenA fastDone
+    in
+    ( Il.Tmp res
+    , s34
+        |> emit (Bin (Just res) L Add slowBody (Il.Con 0))
+        |> jumpTo joinLbl
+        |> startBlock joinLbl
+    )
 
 
 {-| stage 6 P1b Step B — the slot base of a Value operand, when that operand

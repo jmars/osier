@@ -3131,14 +3131,20 @@ checks rt rawMidText =
                 in
                 String.contains "call $q_Rt_x2eallocRecord(" wTxt
                     && not (String.contains "allocVector" wTxt)
+                    -- U-R1 (perf inline-alloc): THE INLINE HEADER, pinned as the
+                    -- NUMBER it is — code 14 in bits 24..27, class 1 in bits
+                    -- 2..23, and the SCAN bit SET (14 is one of the five scanned
+                    -- codes) = 14*2^24 + 1*4 + 2 — and the `n + 1` count the
+                    -- seat owns (3 = the two fields + the names word).  This is
+                    -- STRONGER than the seat-call pin it replaces: a wrong kind,
+                    -- class or scan bit is a different constant, and the word
+                    -- arm's fast path no longer calls the seat to write it.
+                    && String.contains "\tstorel 234881030, %t60\n\tstorel 3, %t61\n" wTxt
                     -- the names store: elemAddr's `mul 8, 2` + `add` + `storel`
-                    -- of the static blob, at index n = 2.  (The temps are one
-                    -- higher than they were before perf word-arm-rawroot item 1:
-                    -- the probe's `"hi"` field cell gained the `sub 16` that
-                    -- turns the byte base into a body.)
-                    && String.contains "\t%t14 =l mul 8, 2\n\t%t15 =l add %t13, %t14\n\tstorel $d" wTxt
+                    -- of the static blob, at index n = 2, off the join's body.
+                    && String.contains "\t%t68 =l mul 8, 2\n\t%t69 =l add %t37, %t68\n\tstorel $d" wTxt
                     -- the tag, OR'd from the body (the one-word heap arm).
-                    && String.contains "\t%t16 =l or %t13, 1\n\tstorel %t16, %s0\n" wTxt
+                    && String.contains "\t%t70 =l or %t37, 1\n\tstorel %t70, %s0\n" wTxt
                     -- THE POISON WORD MUST NOT APPEAR: `storel 7` is what the
                     -- cell writer emits when it REFUSES, and it shipped once in
                     -- this unit (the site named `s.layout.tagRecord`, which on
@@ -3172,10 +3178,15 @@ checks rt rawMidText =
                     -- runtime's interned symbol is a 1-word code-2 block, so a
                     -- 2-word literal would be a different shape for the same
                     -- construct.
-                    && String.contains "storel 8, %s4\n\tstorel 5, %lp\n\t%t0 =:val call $q_Rt_x2eallocSym(l %s4, l %s4, l %s4, w 1)\n" wTxt
-                    && String.contains "\t%t5 =l add %t4, 0\n\tstorel $d1, %t5\n" wTxt
-                    && String.contains "\t%t6 =l or %t4, 1\n" wTxt
-                    && not (String.contains "=l add %t4, 8" wTxt)
+                    -- U-R1 (perf inline-alloc): THE INLINE HEADER — code 2 in
+                    -- bits 24..27, class 1, SCAN BIT CLEAR (2 is a raw code) =
+                    -- 2*2^24 + 1*4 — and the one body word, written by the fast
+                    -- path; the seat call below is the SLOW path and stays.
+                    && String.contains "\tstorel 33554436, %t23\n\tstorel 1, %t24\n" wTxt
+                    && String.contains "storel 8, %s4\n\tstorel 5, %lp\n\t%t26 =:val call $q_Rt_x2eallocSym(l %s4, l %s4, l %s4, w 1)\n" wTxt
+                    && String.contains "\t%t31 =l add %t0, 0\n\tstorel $d1, %t31\n" wTxt
+                    && String.contains "\t%t32 =l or %t0, 1\n" wTxt
+                    && not (String.contains "add %t0, 8" wTxt)
                     && not (String.contains "allocSym" vTxt)
 
             _ ->
@@ -3734,15 +3745,26 @@ checks rt rawMidText =
                         Print.print valMod
                 in
                 String.contains "call $q_Rt_x2eallocRaw(" wTxt
+                    -- U-R1 (perf inline-alloc): THE INLINE HEADER — code 1 in bits
+                    -- 24..27, class 1, SCAN BIT CLEAR (a string body is raw) =
+                    -- 1*2^24 + 1*4 — and the `2 + ceil(bytes/8)` count for a
+                    -- literal that owns no inline bytes (0): 2.
+                    && String.contains "\tstorel 16777220, %t23\n\tstorel 2, %t24\n" wTxt
+                    -- THE CELL'S OWN BYTE SELF-ADDRESS, written by the FAST path
+                    -- exactly as the seat writes it (unit 0 = body + 2 units,
+                    -- unit 1 = 0): `Rt.gcScavPtr`'s promotion fixup reads unit 0,
+                    -- so an inline path that skipped these two stores would hand
+                    -- the scavenge a cell that owns nothing.
+                    && String.contains "\t%t26 =l add %t18, 16\n\t%t27 =l add %t18, 8\n\tstorel %t26, %t18\n\tstorel 0, %t27\n" wTxt
+                    -- THE SLOW ARM still returns the byte base (the seat's
+                    -- `mknum(addr)` untagged): body + 2 units.
+                    && String.contains "\t%t31 =l loadl %t28\n\t%t32 =l sar %t31, 3\n" wTxt
                     -- THE SEAT RETURNS THE BYTE BASE (perf word-arm-rawroot item 1):
                     -- body + 2 units, so the body is `sub 16` and every body unit
-                    -- is an add off THAT.  The seat's argument is the BYTE COUNT,
-                    -- and a literal owns no inline bytes (0).
-                    && String.contains "\t%t3 =l loadl %t0\n\t%t4 =l sar %t3, 3\n\t%t5 =l sub %t4, 16\n" wTxt
-                    && String.contains "\t%t6 =l add %t5, 0\n" wTxt
-                    && String.contains "\tstorel $d0, %t6\n\t%t7 =l add %t5, 8\n" wTxt
-                    && String.contains "\tstorel 2, %t7\n" wTxt
-                    && String.contains "\t%t8 =l or %t5, 1\n" wTxt
+                    -- is an add off THAT.
+                    && String.contains "\t%t33 =l sub %t0, 16\n\t%t34 =l add %t33, 0\n\tstorel $d0, %t34\n" wTxt
+                    && String.contains "\t%t35 =l add %t33, 8\n\tstorel 2, %t35\n" wTxt
+                    && String.contains "\t%t36 =l or %t33, 1\n" wTxt
                     && String.contains "\tstorel 0, %s2\n" wTxt
                     && not (String.contains "storew" wTxt)
                     && String.contains "storew 1, %s" vTxt
@@ -6341,6 +6363,31 @@ checks rt rawMidText =
         )
     , check "U5 LAYOUT PIN: sizeof(Region) == 38 words in runtime.mid's own declaration (slots 0..12 + GC-ARC F1's stats instrument at 13..23 + GC ARC unit 4's growth ceiling at 24 + GC ARC unit 2's block map at 25..27 + GC NURSERY's young/remembered-set family at 28..37 + GC NURSERY's young/remembered-set family at 28..37 — the mark stack starts at word 64, so it is NOT a field, and the digit scratch the printer writes into is at BYTE 320, outside the struct)"
         (Check.sizeofStruct (declsOf runtimeMidText) "Region" == Just 38)
+    -- ==================== U-R1: the INLINE ALLOCATION's region slots ====================
+    -- `Mid.Qbe.Lower`'s inline young bump (perf U-R1) reads six `struct Region`
+    -- fields DIRECTLY, from the emitter, and names them by SLOT.  The U5 rows
+    -- above pin the declaration's field order; this row pins the OTHER side —
+    -- that each slot the emitter states is still that field's slot in
+    -- runtime.mid's OWN declaration — so a field inserted above one of them
+    -- fails HERE instead of silently reading its neighbour's word at every
+    -- allocation on the word arm.
+    , check "U-R1 LAYOUT PIN: the inline allocation's six Region slots are runtime.mid's (heapStart 2, heapEnd 4, allocated 11, young 28, youngEnd 30, youngCursor 31)"
+        (let
+            d =
+                declsOf runtimeMidText
+
+            pinned =
+                [ ( "heapStart", QbeLower.regionSlots.heapStart )
+                , ( "heapEnd", QbeLower.regionSlots.heapEnd )
+                , ( "allocated", QbeLower.regionSlots.allocated )
+                , ( "young", QbeLower.regionSlots.young )
+                , ( "youngEnd", QbeLower.regionSlots.youngEnd )
+                , ( "youngCursor", QbeLower.regionSlots.youngCursor )
+                ]
+         in
+         List.map (\( n, slot ) -> Check.fieldOffset d "Region" n == Just (slot * 8)) pinned
+            == List.repeat (List.length pinned) True
+        )
     -- (u12) THE SPLICE KEEPS THE FILE'S ROWS.  `spliceArm` drops the marker
     -- lines (both arms) and the other arm's regions, and a rejection rendered
     -- from the spliced text is rendered with ITS row — so a splice that

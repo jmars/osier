@@ -42,13 +42,18 @@ need node; need cc
 rc=0
 fail() { echo "FAIL: $*" >&2; rc=1; }
 
-ELM_BIN="${ELM_BIN:-$HOME/.npm-global/lib/node_modules/elm/bin/elm}"
+ELM_BIN="${ELM_BIN:-$(command -v elm || echo "$HOME/.npm-global/lib/node_modules/elm/bin/elm")}"
 (cd "$ROOT/osier-compiler" && ELM_HOME="$PWD/.elm-cache" "$ELM_BIN" make src/Main.elm --output=compiler.js >/dev/null) \
   || { echo "probe-midgc-young: elm make compiler.js failed" >&2; exit 1; }
 
-BIN="$(QBE_MIDGC=1 QBE_MIDGC_YOUNG=1 "$ROOT/tools/qbe/qbe-mk.sh" tools/qbe/fixtures/valchurn.elm Valchurn.main "$WORK" 2>"$WORK/mk.log")" \
+# QBE_VALREP=val is PINNED (the a148922 class): the fixtures' .mid surfaces spell
+# inline heap cells the word arm's emitter cannot lower (VR3b2), so an unpinned
+# run dies at the fixture BUILD on the default (word) arm before any nursery
+# invariant executes.  The nursery this probe drives is arm-shared; the val arm
+# builds the fixtures and runs the churn.
+BIN="$(QBE_MIDGC=1 QBE_MIDGC_YOUNG=1 QBE_VALREP=val "$ROOT/tools/qbe/qbe-mk.sh" tools/qbe/fixtures/valchurn.elm Valchurn.main "$WORK" 2>"$WORK/mk.log")" \
   || { echo "probe-midgc-young: qbe-mk failed" >&2; cat "$WORK/mk.log" >&2; exit 1; }
-YBIN="$(QBE_MIDGC=1 QBE_MIDGC_YOUNG=1 "$ROOT/tools/qbe/qbe-mk.sh" tools/qbe/fixtures/young.elm Young.main "$WORK" 2>"$WORK/mky.log")" \
+YBIN="$(QBE_MIDGC=1 QBE_MIDGC_YOUNG=1 QBE_VALREP=val "$ROOT/tools/qbe/qbe-mk.sh" tools/qbe/fixtures/young.elm Young.main "$WORK" 2>"$WORK/mky.log")" \
   || { echo "probe-midgc-young: qbe-mk (young) failed" >&2; cat "$WORK/mky.log" >&2; exit 1; }
 
 run() { timeout 120 "$@"; }
